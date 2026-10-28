@@ -114,8 +114,8 @@
                         </div>
                     </div>
 
-                    <!-- Include local bind mounts and data -->
-                    <div class="form-check mb-4">
+                    <!-- Include volumes and bind mounts -->
+                    <div class="form-check mb-3">
                         <input
                             id="includeVolumesCheck"
                             v-model="config.includeVolumes"
@@ -123,8 +123,124 @@
                             type="checkbox"
                         />
                         <label class="form-check-label" for="includeVolumesCheck">
-                            {{ $t("Include local bind-mounts and volume folders in stack directory") }}
+                            {{ $t("Include named Docker volumes and external bind-mounts") }}
                         </label>
+                    </div>
+
+                    <!-- Detected Volumes List -->
+                    <div v-if="volumeInspection && volumeInspection.volumes.length > 0" class="mb-4">
+                        <label class="form-label text-secondary small fw-bold d-flex justify-content-between align-items-center">
+                            <span>{{ $t("Detected Stack Volumes & Mounts") }}</span>
+                            <button
+                                type="button"
+                                class="btn btn-link btn-sm p-0 text-decoration-none"
+                                @click="inspectVolumes"
+                            >
+                                <font-awesome-icon icon="arrows-rotate" class="me-1" />
+                                {{ $t("Re-scan") }}
+                            </button>
+                        </label>
+                        <div class="list-group list-group-flush border volume-list">
+                            <div
+                                v-for="(vol, i) in volumeInspection.volumes"
+                                :key="i"
+                                class="list-group-item d-flex justify-content-between align-items-center py-2 px-3 bg-transparent"
+                            >
+                                <div class="small text-truncate me-2">
+                                    <span
+                                        class="badge me-2"
+                                        :class="getVolumeKindBadgeClass(vol.kind)"
+                                    >
+                                        {{ formatVolumeKind(vol.kind) }}
+                                    </span>
+                                    <span
+                                        v-if="vol.isExternalResource"
+                                        class="badge bg-secondary me-2"
+                                    >
+                                        external: true
+                                    </span>
+                                    <code>{{ vol.source }}</code>
+                                    <span class="text-secondary mx-1">&rarr;</span>
+                                    <code class="text-secondary">{{ vol.target }}</code>
+                                </div>
+                                <span
+                                    v-if="vol.isAccessible"
+                                    class="badge bg-success"
+                                    :title="vol.hostPath"
+                                >
+                                    <font-awesome-icon icon="check-circle" class="me-1" />
+                                    {{ $t("Mounted") }}
+                                </span>
+                                <span
+                                    v-else
+                                    class="badge bg-danger"
+                                    :title="vol.hostPath"
+                                >
+                                    <font-awesome-icon icon="exclamation-circle" class="me-1" />
+                                    {{ $t("Unmounted") }}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- External Networks / Volumes Dependency Hint -->
+                    <div
+                        v-if="volumeInspection && volumeInspection.preStartCommands && volumeInspection.preStartCommands.length > 0"
+                        class="alert alert-info mb-4"
+                    >
+                        <div class="fw-bold mb-1">
+                            <font-awesome-icon icon="info-circle" class="me-1" />
+                            {{ $t("External Resources Required on New Host") }}
+                        </div>
+                        <p class="small mb-2">
+                            {{ $t("This stack references external networks or volumes (external: true). Before starting this stack after restoring on a new host, run:") }}
+                        </p>
+                        <pre class="p-2 bg-black text-light small mb-0 snippet-box">{{ volumeInspection.preStartCommands.join("\n") }}</pre>
+                    </div>
+
+                    <!-- Unresolved Environment Variable Error -->
+                    <div
+                        v-if="volumeInspection && volumeInspection.unresolvedVariables && volumeInspection.unresolvedVariables.length > 0"
+                        class="alert alert-danger mb-4"
+                    >
+                        <div class="fw-bold mb-1">
+                            <font-awesome-icon icon="exclamation-circle" class="me-1" />
+                            {{ $t("Unresolved Environment Variables in Volumes") }}
+                        </div>
+                        <p class="small mb-1">
+                            {{ $t("The following volume paths contain undefined .env variables and will block backup until resolved:") }}
+                        </p>
+                        <ul class="small mb-0">
+                            <li v-for="(u, idx) in volumeInspection.unresolvedVariables" :key="idx">
+                                <code>{{ u }}</code>
+                            </li>
+                        </ul>
+                    </div>
+
+                    <!-- Incomplete Backup Warning when unmounted paths exist -->
+                    <div
+                        v-if="config.includeVolumes && hasMissingMounts"
+                        class="alert alert-warning mb-4"
+                    >
+                        <div class="fw-bold mb-1">
+                            <font-awesome-icon icon="exclamation-triangle" class="me-1" />
+                            {{ $t("Unmounted Volume Paths Detected") }}
+                        </div>
+                        <p class="small mb-2">
+                            {{ $t("This stack uses named volumes or host paths that are not currently mounted inside the Dockge container. To back them up, add the following to Dockge's own compose.yaml:") }}
+                        </p>
+                        <pre class="p-2 bg-black text-light small mb-2 snippet-box">{{ volumeInspection.recommendedComposeSnippet }}</pre>
+                        <div class="form-check mt-2">
+                            <input
+                                id="allowIncompleteBackupCheck"
+                                v-model="allowIncompleteBackup"
+                                class="form-check-input"
+                                type="checkbox"
+                            />
+                            <label class="form-check-label small fw-bold text-danger" for="allowIncompleteBackupCheck">
+                                {{ $t("I understand these unmounted volumes will be skipped (allow incomplete backup)") }}
+                            </label>
+                        </div>
                     </div>
 
                     <!-- Actions -->
@@ -143,7 +259,7 @@
                         <button
                             class="btn btn-outline-primary"
                             type="button"
-                            :disabled="backingUp || !pbsConfigured"
+                            :disabled="backingUp || !pbsConfigured || (config.includeVolumes && hasMissingMounts && !allowIncompleteBackup)"
                             @click="triggerBackup"
                         >
                             <font-awesome-icon v-if="backingUp" icon="spinner" spin class="me-1" />
@@ -238,6 +354,7 @@
         <PbsRestoreModal
             :show="showRestoreModal"
             :snapshot="selectedSnapshot"
+            :default-stack-name="stackName"
             @close="showRestoreModal = false"
             @restore-started="onRestoreStarted"
         />
@@ -266,7 +383,7 @@ export default {
             default: () => [],
         },
     },
-    emits: ["close"],
+    emits: [ "close" ],
     data() {
         return {
             pbsConfigured: false,
@@ -277,6 +394,8 @@ export default {
             showRestoreModal: false,
             selectedSnapshot: null,
             schedulePreset: "global",
+            allowIncompleteBackup: false,
+            volumeInspection: null,
             config: {
                 enabled: true,
                 containerMode: "none",
@@ -287,6 +406,15 @@ export default {
             logs: [],
         };
     },
+    computed: {
+        hasMissingMounts() {
+            return Boolean(
+                this.volumeInspection &&
+                Array.isArray(this.volumeInspection.missingMounts) &&
+                this.volumeInspection.missingMounts.length > 0
+            );
+        },
+    },
     watch: {
         stackName() {
             this.loadAll();
@@ -295,7 +423,9 @@ export default {
             handler() {
                 this.$nextTick(() => {
                     const el = this.$refs.logBox;
-                    if (el) el.scrollTop = el.scrollHeight;
+                    if (el) {
+                        el.scrollTop = el.scrollHeight;
+                    }
                 });
             },
             deep: true,
@@ -330,9 +460,11 @@ export default {
     },
     methods: {
         loadAll() {
+            this.allowIncompleteBackup = false;
             this.checkPbsStatus();
             this.loadConfig();
             this.loadSnapshots();
+            this.inspectVolumes();
         },
         checkPbsStatus() {
             this.$root.getSocket().emit("getPbsConfig", (res) => {
@@ -343,10 +475,20 @@ export default {
                 }
             });
         },
+        inspectVolumes() {
+            this.$root.getSocket().emit("inspectStackVolumes", this.stackName, (res) => {
+                if (res.ok && res.data) {
+                    this.volumeInspection = res.data;
+                } else {
+                    this.volumeInspection = null;
+                }
+            });
+        },
         loadConfig() {
             this.$root.getSocket().emit("getStackBackupConfig", this.stackName, (res) => {
                 if (res.ok && res.data) {
-                    this.config = { ...this.config, ...res.data };
+                    this.config = { ...this.config,
+                        ...res.data };
                     if (!this.config.cron) {
                         this.schedulePreset = "global";
                     } else if (this.config.cron === "0 2 * * *") {
@@ -397,6 +539,8 @@ export default {
             this.$root.getSocket().emit("startPbsBackup", {
                 stackName: this.stackName,
                 containerMode: this.config.containerMode || "none",
+                includeVolumes: this.config.includeVolumes,
+                allowIncompleteBackup: this.allowIncompleteBackup,
                 includeDockgeData: false,
             }, (res) => {
                 if (res.ok) {
@@ -406,6 +550,24 @@ export default {
                     this.$root.toastError(res.msg);
                 }
             });
+        },
+        formatVolumeKind(kind) {
+            if (kind === "named-volume") {
+                return this.$t("Named Volume");
+            }
+            if (kind === "external-bind") {
+                return this.$t("External Path");
+            }
+            return this.$t("Stack Folder");
+        },
+        getVolumeKindBadgeClass(kind) {
+            if (kind === "named-volume") {
+                return "bg-primary";
+            }
+            if (kind === "external-bind") {
+                return "bg-info text-dark";
+            }
+            return "bg-secondary";
         },
         openRestore(snap) {
             this.selectedSnapshot = snap;
@@ -429,17 +591,23 @@ export default {
             }
         },
         formatTime(timestamp) {
-            if (!timestamp) return "";
+            if (!timestamp) {
+                return "";
+            }
             return new Date(timestamp).toLocaleTimeString();
         },
         formatDate(dateStr) {
-            if (!dateStr) return "-";
+            if (!dateStr) {
+                return "-";
+            }
             return new Date(dateStr).toLocaleString();
         },
         formatSize(bytes) {
-            if (!bytes || bytes === 0) return "0 B";
+            if (!bytes || bytes === 0) {
+                return "0 B";
+            }
             const k = 1024;
-            const sizes = ["B", "KB", "MB", "GB", "TB"];
+            const sizes = [ "B", "KB", "MB", "GB", "TB" ];
             const i = Math.floor(Math.log(bytes) / Math.log(k));
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
         },
@@ -452,6 +620,16 @@ export default {
 
 .shadow-box {
     border-radius: 10px !important;
+}
+
+.volume-list {
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.snippet-box {
+    border-radius: 8px;
+    margin: 0;
 }
 
 .terminal-box {

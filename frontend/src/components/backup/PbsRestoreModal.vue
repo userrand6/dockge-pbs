@@ -72,6 +72,19 @@
                         </div>
                     </div>
 
+                    <!-- Restore volumes checkbox -->
+                    <div class="form-check mb-3">
+                        <input
+                            id="restoreVolumesCheck"
+                            v-model="restoreVolumes"
+                            class="form-check-input"
+                            type="checkbox"
+                        />
+                        <label class="form-check-label" for="restoreVolumesCheck">
+                            {{ $t("Restore associated named Docker volumes and external bind mounts") }}
+                        </label>
+                    </div>
+
                     <!-- Pre-restore backup safety checkbox -->
                     <div class="form-check mb-3">
                         <input
@@ -143,13 +156,18 @@ export default {
             type: Object,
             default: null,
         },
+        defaultStackName: {
+            type: String,
+            default: "",
+        },
     },
-    emits: ["close", "restore-started"],
+    emits: [ "close", "restore-started" ],
     data() {
         return {
             loading: false,
             restoreMode: "single",
             stackName: "",
+            restoreVolumes: true,
             createPreRestoreBackup: true,
             startAfterRestore: false,
             confirmed: false,
@@ -160,6 +178,10 @@ export default {
             if (val) {
                 this.confirmed = false;
                 this.loading = false;
+                if (this.defaultStackName) {
+                    this.stackName = this.defaultStackName;
+                    this.restoreMode = "single";
+                }
             }
         },
     },
@@ -169,16 +191,34 @@ export default {
                 this.$emit("close");
             }
         },
+        resolveArchiveName(targetStack) {
+            const files = this.snapshot?.files || [];
+            if (targetStack && Array.isArray(files)) {
+                const dedicated = files.find(
+                    (f) =>
+                        f.filename === `${targetStack}.pxar` ||
+                        f.filename === `${targetStack}.pxar.didx` ||
+                        f.filename === `${targetStack}.mpxar.didx` ||
+                        f.filename === `${targetStack}.ppxar.didx`
+                );
+                if (dedicated) {
+                    return `${targetStack}.pxar`;
+                }
+            }
+            return "stacks.pxar";
+        },
         executeRestore() {
             if (!this.confirmed) {
                 return;
             }
 
             this.loading = true;
+            const targetStack = this.restoreMode === "single" ? this.stackName.trim() : undefined;
             const options = {
                 snapshot: this.snapshot.snapshotId,
-                archiveName: "stacks.pxar",
-                stackName: this.restoreMode === "single" ? this.stackName.trim() : undefined,
+                archiveName: this.resolveArchiveName(targetStack),
+                stackName: targetStack,
+                restoreVolumes: this.restoreVolumes,
                 createPreRestoreBackup: this.createPreRestoreBackup,
                 startAfterRestore: this.startAfterRestore,
             };

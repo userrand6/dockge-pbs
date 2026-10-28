@@ -10,6 +10,9 @@ tmp
 # Docker extra
 docker
 frontend
+test
+*.md
+build-docker.sh
 .editorconfig
 .eslintrc.cjs
 .git

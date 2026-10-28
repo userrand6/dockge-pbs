@@ -17,13 +17,17 @@ export interface RecordedExecution {
 export class MockPbsRunner {
     public executions: RecordedExecution[] = [];
     public mockResponses: Map<string, { code: number; stdout: string; stderr: string }> = new Map();
-    public defaultResponse = { code: 0, stdout: "{}", stderr: "" };
+    public defaultResponse = { code: 0,
+        stdout: "{}",
+        stderr: "" };
 
     /**
      * Program a specific response for a command matching a prefix.
      */
     public setResponse(commandKey: string, code: number, stdout: string, stderr = "") {
-        this.mockResponses.set(commandKey, { code, stdout, stderr });
+        this.mockResponses.set(commandKey, { code,
+            stdout,
+            stderr });
     }
 
     /**
@@ -42,14 +46,14 @@ export class MockPbsRunner {
             const fullCmd = `${command} ${args.join(" ")}`;
             this.executions.push({
                 command,
-                args: [...args],
+                args: [ ...args ],
                 env: options.env ? { ...options.env } : undefined,
                 cwd: options.cwd,
             });
 
             // Find matching response or use default
             let resp = this.defaultResponse;
-            for (const [key, val] of this.mockResponses.entries()) {
+            for (const [ key, val ] of this.mockResponses.entries()) {
                 if (fullCmd.includes(key)) {
                     resp = val;
                     break;

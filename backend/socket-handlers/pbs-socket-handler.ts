@@ -1,10 +1,11 @@
 import { SocketHandler } from "../socket-handler.js";
 import { DockgeServer } from "../dockge-server";
-import { log } from "../log";
 import { callbackError, callbackResult, checkLogin, DockgeSocket } from "../util-server";
 import { pbsManager } from "../pbs/pbs-manager";
 import { pbsScheduler } from "../pbs/pbs-scheduler";
-import { BackupOptions, PbsConfig, PbsScheduleConfig, RestoreOptions } from "../pbs/pbs-types";
+import { BackupOptions, PbsConfig, PbsScheduleConfig, RestoreOptions, StackBackupConfig } from "../pbs/pbs-types";
+
+const MASKED_SECRET = "********";
 
 /**
  * Socket.IO handler exposing Proxmox Backup Server operations to the Dockge UI.
@@ -15,7 +16,50 @@ import { BackupOptions, PbsConfig, PbsScheduleConfig, RestoreOptions } from "../
  */
 export class PbsSocketHandler extends SocketHandler {
 
-    create(socket: DockgeSocket, server: DockgeServer) {
+    /**
+     * Authenticates the socket, runs `action()`, and sends the result or error via `callback`.
+     */
+    private async handleAuth(
+        socket: DockgeSocket,
+        callback: unknown,
+        action: () => Promise<Record<string, unknown>>
+    ) {
+        try {
+            checkLogin(socket);
+            const result = await action();
+            callbackResult({ ok: true,
+                ...result }, callback);
+        } catch (e) {
+            callbackError(e, callback);
+        }
+    }
+
+    /**
+     * Retains previously stored secrets if the client submits the masked placeholder or an empty string.
+     */
+    private mergeSecrets(input: PbsConfig, existing: PbsConfig): PbsConfig {
+        return {
+            ...input,
+            secret: (!input.secret || input.secret === MASKED_SECRET)
+                ? existing.secret || ""
+                : input.secret,
+            encryptionPassword: (!input.encryptionPassword || input.encryptionPassword === MASKED_SECRET)
+                ? existing.encryptionPassword || ""
+                : input.encryptionPassword,
+        };
+    }
+
+    /**
+     * Validates that a socket argument is a non-empty stack name string.
+     */
+    private requireStackName(stackName: unknown): string {
+        if (typeof stackName !== "string" || !stackName.trim()) {
+            throw new Error("Invalid stack name.");
+        }
+        return stackName.trim();
+    }
+
+    create(socket: DockgeSocket, _server: DockgeServer) {
 
         // Setup real-time log event streaming for this socket
         const unsubscribeLogs = pbsManager.addLogListener((event) => {
@@ -27,291 +71,178 @@ export class PbsSocketHandler extends SocketHandler {
         });
 
         // 1. Get PBS Configuration (with masked secret)
-        socket.on("getPbsConfig", async (callback: unknown) => {
-            try {
-                checkLogin(socket);
+        socket.on("getPbsConfig", (callback: unknown) =>
+            this.handleAuth(socket, callback, async () => {
                 const config = await pbsManager.getConfig();
-
-                // Mask sensitive secrets before sending to client
-                const safeConfig: PbsConfig = {
-                    ...config,
-                    secret: config.secret ? "********" : "",
-                    encryptionPassword: config.encryptionPassword ? "********" : "",
+                return {
+                    data: {
+                        ...config,
+                        secret: config.secret ? MASKED_SECRET : "",
+                        encryptionPassword: config.encryptionPassword ? MASKED_SECRET : "",
+                    },
                 };
-
-                callbackResult({
-                    ok: true,
-                    data: safeConfig,
-                }, callback);
-            } catch (e) {
-                callbackError(e, callback);
-            }
-        });
+            })
+        );
 
         // 2. Save PBS Configuration
-        socket.on("savePbsConfig", async (inputConfig: unknown, callback: unknown) => {
-            try {
-                checkLogin(socket);
+        socket.on("savePbsConfig", (inputConfig: unknown, callback: unknown) =>
+            this.handleAuth(socket, callback, async () => {
                 if (!inputConfig || typeof inputConfig !== "object") {
                     throw new Error("Configuration must be a valid object.");
                 }
-
-                const newConfig = inputConfig as PbsConfig;
                 const existingConfig = await pbsManager.getConfig();
+                const merged = this.mergeSecrets(inputConfig as PbsConfig, existingConfig);
 
-                // If user didn't change masked secret, retain existing secret
-                if (newConfig.secret === "********" || !newConfig.secret) {
-                    newConfig.secret = existingConfig.secret || "";
-                }
-
-                if (newConfig.encryptionPassword === "********" || !newConfig.encryptionPassword) {
-                    newConfig.encryptionPassword = existingConfig.encryptionPassword || "";
-                }
-
-                await pbsManager.saveConfig(newConfig);
+                await pbsManager.saveConfig(merged);
                 await pbsScheduler.reschedule();
-
-                callbackResult({
-                    ok: true,
-                    msg: "PBS configuration saved successfully.",
-                }, callback);
-            } catch (e) {
-                callbackError(e, callback);
-            }
-        });
+                return { msg: "PBS configuration saved successfully." };
+            })
+        );
 
         // 3. Test PBS Connection
-        socket.on("testPbsConnection", async (testConfigInput: unknown, callback: unknown) => {
-            try {
-                checkLogin(socket);
-                let testConfig: PbsConfig;
-
-                if (testConfigInput && typeof testConfigInput === "object") {
-                    const input = testConfigInput as PbsConfig;
-                    const existingConfig = await pbsManager.getConfig();
-
-                    testConfig = {
-                        ...input,
-                        secret: (input.secret === "********" || !input.secret) ? existingConfig.secret : input.secret,
-                        encryptionPassword: (input.encryptionPassword === "********" || !input.encryptionPassword)
-                            ? existingConfig.encryptionPassword
-                            : input.encryptionPassword,
-                    };
-                } else {
-                    testConfig = await pbsManager.getConfig();
-                }
+        socket.on("testPbsConnection", (testConfigInput: unknown, callback: unknown) =>
+            this.handleAuth(socket, callback, async () => {
+                const existingConfig = await pbsManager.getConfig();
+                const testConfig = (testConfigInput && typeof testConfigInput === "object")
+                    ? this.mergeSecrets(testConfigInput as PbsConfig, existingConfig)
+                    : existingConfig;
 
                 const client = await pbsManager.getClient(testConfig);
                 const result = await client.testConnection();
-
-                callbackResult({
-                    ok: true,
+                return {
                     msg: "Connection to Proxmox Backup Server successful!",
                     version: result.version,
-                }, callback);
-            } catch (e) {
-                callbackError(e, callback);
-            }
-        });
+                };
+            })
+        );
 
         // 4. Get Current PBS Status & Recent Logs
-        socket.on("getPbsStatus", async (callback: unknown) => {
-            try {
-                checkLogin(socket);
+        socket.on("getPbsStatus", (callback: unknown) =>
+            this.handleAuth(socket, callback, async () => {
                 const status = await pbsManager.getStatus();
-                const nextRun = pbsScheduler.getNextRun();
-                const recentLogs = pbsManager.getRecentLogs();
-
-                callbackResult({
-                    ok: true,
+                return {
                     data: {
                         ...status,
-                        nextScheduledRun: nextRun,
-                        recentLogs,
+                        nextScheduledRun: pbsScheduler.getNextRun(),
+                        recentLogs: pbsManager.getRecentLogs(),
                     },
-                }, callback);
-            } catch (e) {
-                callbackError(e, callback);
-            }
-        });
+                };
+            })
+        );
 
         // 5. Trigger Manual Backup
-        socket.on("startPbsBackup", async (optionsInput: unknown, callback: unknown) => {
-            try {
-                checkLogin(socket);
+        socket.on("startPbsBackup", (optionsInput: unknown, callback: unknown) =>
+            this.handleAuth(socket, callback, async () => {
                 const options = (optionsInput && typeof optionsInput === "object" ? optionsInput : {}) as BackupOptions;
 
-                // Start backup (runs asynchronously, progress emitted via pbsLog)
                 pbsManager.startBackup(options).then((res) => {
-                    socket.emit("pbsBackupFinished", { ok: true, message: res.message });
+                    socket.emit("pbsBackupFinished", { ok: true,
+                        message: res.message });
                 }).catch((err) => {
-                    socket.emit("pbsBackupFinished", { ok: false, message: err.message || String(err) });
+                    socket.emit("pbsBackupFinished", { ok: false,
+                        message: err.message || String(err) });
                 });
 
-                callbackResult({
-                    ok: true,
-                    msg: "Backup operation initiated.",
-                }, callback);
-            } catch (e) {
-                callbackError(e, callback);
-            }
-        });
+                return { msg: "Backup operation initiated." };
+            })
+        );
 
         // 6. List Snapshots from PBS
-        socket.on("getPbsSnapshots", async (callback: unknown) => {
-            try {
-                checkLogin(socket);
-                const snapshots = await pbsManager.listSnapshots();
-
-                callbackResult({
-                    ok: true,
-                    data: snapshots,
-                }, callback);
-            } catch (e) {
-                callbackError(e, callback);
-            }
-        });
+        socket.on("getPbsSnapshots", (callback: unknown) =>
+            this.handleAuth(socket, callback, async () => ({
+                data: await pbsManager.listSnapshots(),
+            }))
+        );
 
         // 7. Trigger Restore
-        socket.on("startPbsRestore", async (restoreInput: unknown, callback: unknown) => {
-            try {
-                checkLogin(socket);
+        socket.on("startPbsRestore", (restoreInput: unknown, callback: unknown) =>
+            this.handleAuth(socket, callback, async () => {
                 if (!restoreInput || typeof restoreInput !== "object") {
                     throw new Error("Restore options must be provided.");
                 }
 
-                const options = restoreInput as RestoreOptions;
-
-                // Run restore asynchronously
-                pbsManager.startRestore(options).then((res) => {
-                    socket.emit("pbsRestoreFinished", { ok: true, message: res.message });
+                pbsManager.startRestore(restoreInput as RestoreOptions).then((res) => {
+                    socket.emit("pbsRestoreFinished", { ok: true,
+                        message: res.message });
                 }).catch((err) => {
-                    socket.emit("pbsRestoreFinished", { ok: false, message: err.message || String(err) });
+                    socket.emit("pbsRestoreFinished", { ok: false,
+                        message: err.message || String(err) });
                 });
 
-                callbackResult({
-                    ok: true,
-                    msg: "Restore operation initiated.",
-                }, callback);
-            } catch (e) {
-                callbackError(e, callback);
-            }
-        });
+                return { msg: "Restore operation initiated." };
+            })
+        );
 
         // 8. Delete / Forget Snapshot
-        socket.on("deletePbsSnapshot", async (snapshotId: unknown, callback: unknown) => {
-            try {
-                checkLogin(socket);
+        socket.on("deletePbsSnapshot", (snapshotId: unknown, callback: unknown) =>
+            this.handleAuth(socket, callback, async () => {
                 if (typeof snapshotId !== "string" || !snapshotId.trim()) {
                     throw new Error("Invalid snapshot identifier.");
                 }
-
                 const result = await pbsManager.deleteSnapshot(snapshotId.trim());
-
-                callbackResult({
-                    ok: true,
-                    msg: result.message,
-                }, callback);
-            } catch (e) {
-                callbackError(e, callback);
-            }
-        });
+                return { msg: result.message };
+            })
+        );
 
         // 9. Get Schedule Configuration
-        socket.on("getPbsSchedule", async (callback: unknown) => {
-            try {
-                checkLogin(socket);
+        socket.on("getPbsSchedule", (callback: unknown) =>
+            this.handleAuth(socket, callback, async () => {
                 const schedule = await pbsScheduler.getScheduleConfig();
-                const nextRun = pbsScheduler.getNextRun();
-
-                callbackResult({
-                    ok: true,
+                return {
                     data: {
                         ...schedule,
-                        nextRun,
+                        nextRun: pbsScheduler.getNextRun(),
                     },
-                }, callback);
-            } catch (e) {
-                callbackError(e, callback);
-            }
-        });
+                };
+            })
+        );
 
         // 10. Save Schedule Configuration
-        socket.on("savePbsSchedule", async (scheduleInput: unknown, callback: unknown) => {
-            try {
-                checkLogin(socket);
+        socket.on("savePbsSchedule", (scheduleInput: unknown, callback: unknown) =>
+            this.handleAuth(socket, callback, async () => {
                 if (!scheduleInput || typeof scheduleInput !== "object") {
                     throw new Error("Schedule configuration must be an object.");
                 }
-
                 await pbsScheduler.saveScheduleConfig(scheduleInput as PbsScheduleConfig);
-
-                callbackResult({
-                    ok: true,
+                return {
                     msg: "Backup schedule updated successfully.",
                     nextRun: pbsScheduler.getNextRun(),
-                }, callback);
-            } catch (e) {
-                callbackError(e, callback);
-            }
-        });
+                };
+            })
+        );
 
         // 11. Get Stack Backup Configuration
-        socket.on("getStackBackupConfig", async (stackName: unknown, callback: unknown) => {
-            try {
-                checkLogin(socket);
-                if (typeof stackName !== "string" || !stackName.trim()) {
-                    throw new Error("Invalid stack name.");
-                }
-
-                const config = await pbsManager.getStackConfig(stackName.trim());
-                callbackResult({
-                    ok: true,
-                    data: config,
-                }, callback);
-            } catch (e) {
-                callbackError(e, callback);
-            }
-        });
+        socket.on("getStackBackupConfig", (stackName: unknown, callback: unknown) =>
+            this.handleAuth(socket, callback, async () => ({
+                data: await pbsManager.getStackConfig(this.requireStackName(stackName)),
+            }))
+        );
 
         // 12. Save Stack Backup Configuration
-        socket.on("saveStackBackupConfig", async (stackName: unknown, configInput: unknown, callback: unknown) => {
-            try {
-                checkLogin(socket);
-                if (typeof stackName !== "string" || !stackName.trim()) {
-                    throw new Error("Invalid stack name.");
-                }
+        socket.on("saveStackBackupConfig", (stackName: unknown, configInput: unknown, callback: unknown) =>
+            this.handleAuth(socket, callback, async () => {
+                const cleanName = this.requireStackName(stackName);
                 if (!configInput || typeof configInput !== "object") {
                     throw new Error("Configuration must be an object.");
                 }
-
-                await pbsManager.saveStackConfig(stackName.trim(), configInput as any);
-                callbackResult({
-                    ok: true,
-                    msg: "Stack backup configuration saved.",
-                }, callback);
-            } catch (e) {
-                callbackError(e, callback);
-            }
-        });
+                await pbsManager.saveStackConfig(cleanName, configInput as StackBackupConfig);
+                return { msg: "Stack backup configuration saved." };
+            })
+        );
 
         // 13. Get Snapshots for a specific stack
-        socket.on("getStackSnapshots", async (stackName: unknown, callback: unknown) => {
-            try {
-                checkLogin(socket);
-                if (typeof stackName !== "string" || !stackName.trim()) {
-                    throw new Error("Invalid stack name.");
-                }
+        socket.on("getStackSnapshots", (stackName: unknown, callback: unknown) =>
+            this.handleAuth(socket, callback, async () => ({
+                data: await pbsManager.listStackSnapshots(this.requireStackName(stackName)),
+            }))
+        );
 
-                const snapshots = await pbsManager.listStackSnapshots(stackName.trim());
-                callbackResult({
-                    ok: true,
-                    data: snapshots,
-                }, callback);
-            } catch (e) {
-                callbackError(e, callback);
-            }
-        });
+        // 14. Inspect Stack Volumes & Mount Accessibility
+        socket.on("inspectStackVolumes", (stackName: unknown, callback: unknown) =>
+            this.handleAuth(socket, callback, async () => ({
+                data: await pbsManager.inspectStackVolumes(this.requireStackName(stackName)),
+            }))
+        );
     }
 }
 

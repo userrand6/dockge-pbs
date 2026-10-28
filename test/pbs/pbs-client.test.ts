@@ -1,4 +1,4 @@
-import test, { describe, it, beforeEach } from "node:test";
+import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { PbsClient, PbsClientError } from "../../backend/pbs/pbs-client";
 import { MockPbsRunner } from "./mock-pbs-runner";
@@ -67,7 +67,8 @@ describe("PbsClient", () => {
 
         const logged: string[] = [];
         await client.backup(
-            { "stacks.pxar": "/opt/stacks", "dockge-data.pxar": "/app/data" },
+            { "stacks.pxar": "/opt/stacks",
+                "dockge-data.pxar": "/app/data" },
             "test-node",
             (e) => logged.push(e.text)
         );
@@ -80,6 +81,7 @@ describe("PbsClient", () => {
         assert.ok(exec.args.includes("dockge-data.pxar:/app/data"));
         assert.ok(exec.args.includes("--backup-id"));
         assert.ok(exec.args.includes("test-node"));
+        assert.ok(exec.args.includes("--change-detection-mode=metadata"));
         assert.ok(exec.args.includes("--ns"));
         assert.ok(exec.args.includes("custom-ns"));
         assert.ok(logged.some((l) => l.includes("Uploaded pxar: 100%")));
@@ -92,7 +94,8 @@ describe("PbsClient", () => {
                 "backup-type": "host",
                 "backup-id": "my-dockge-node",
                 "backup-time": 1700000000,
-                files: [{ filename: "stacks.pxar", size: 5242880 }],
+                files: [{ filename: "stacks.pxar",
+                    size: 5242880 }],
                 size: 5242880,
                 comment: "Automated daily backup",
             },
@@ -104,7 +107,7 @@ describe("PbsClient", () => {
         assert.equal(snapshots.length, 1);
         assert.equal(snapshots[0]["backup-id"], "my-dockge-node");
         assert.equal(snapshots[0]["backup-time"], 1700000000);
-        assert.equal(snapshots[0].snapshotId, "host/my-dockge-node/2023-11-14T22:13:20.000Z");
+        assert.equal(snapshots[0].snapshotId, "host/my-dockge-node/2023-11-14T22:13:20Z");
         assert.equal(snapshots[0].files?.[0].filename, "stacks.pxar");
     });
 
@@ -114,7 +117,7 @@ describe("PbsClient", () => {
 
         await assert.rejects(
             async () => await client.listSnapshots(),
-            (err: any) => err instanceof PbsClientError && err.message.includes("Invalid JSON")
+            (err: Error) => err instanceof PbsClientError && err.message.includes("Invalid JSON")
         );
     });
 
@@ -168,7 +171,7 @@ describe("PbsClient", () => {
 
         await assert.rejects(
             async () => await client.testConnection(),
-            (err: any) => {
+            (err: Error) => {
                 assert.ok(err instanceof PbsClientError);
                 assert.equal(err.exitCode, 2);
                 assert.ok(err.message.includes("authentication failed"));

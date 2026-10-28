@@ -72,6 +72,16 @@ export interface BackupOptions {
      * Defaults to true for full disaster recovery.
      */
     includeDockgeData?: boolean;
+    /**
+     * Whether to include named Docker volumes and external bind mounts defined in compose.yaml.
+     * Defaults to true.
+     */
+    includeVolumes?: boolean;
+    /**
+     * If true, proceeds with backing up the stack even if some external/named volumes
+     * are not mounted into Dockge (incomplete backup). Defaults to false.
+     */
+    allowIncompleteBackup?: boolean;
 }
 
 /**
@@ -103,6 +113,90 @@ export interface RestoreOptions {
      * If true, creates a backup copy of existing files before overwriting.
      */
     createPreRestoreBackup?: boolean;
+    /**
+     * Whether to also restore named volumes and external bind mounts recorded in .pbs-manifest.json.
+     * Defaults to true.
+     */
+    restoreVolumes?: boolean;
+}
+
+/**
+ * Represents a single volume or bind mount detected in a stack's compose.yaml.
+ */
+export interface DetectedStackVolume {
+    /**
+     * Mount classification:
+     * - "internal-bind": bind mount located inside the stack folder (e.g. ./data) -> backed up automatically with stack
+     * - "external-bind": bind mount located outside the stack folder (e.g. /mnt/nas/media)
+     * - "named-volume": Docker-managed named volume (e.g. db_data -> /var/lib/docker/volumes/<stack>_db_data/_data)
+     */
+    kind: "internal-bind" | "external-bind" | "named-volume";
+    /** Service in compose.yaml that mounts this volume */
+    serviceName: string;
+    /** Source identifier in compose.yaml (volume key or host path) */
+    source: string;
+    /** Target mount path inside the container */
+    target: string;
+    /** Resolved Docker volume name (e.g. "mystack_db_data") when kind === "named-volume" */
+    dockerVolumeName?: string;
+    /** Physical directory path on the host filesystem */
+    hostPath: string;
+    /** Dedicated .pxar archive filename inside PBS snapshot (for external-bind and named-volume) */
+    archiveName: string;
+    /** True if Dockge can currently read/write this path (mounted into Dockge container or running on bare-metal) */
+    isAccessible: boolean;
+    /** True if the path currently exists on disk */
+    existsOnDisk: boolean;
+    /** True if the path is a directory (or does not exist yet); false if it is a single file */
+    isDirectory: boolean;
+    /** True if this named volume is declared with `external: true` in compose.yaml */
+    isExternalResource?: boolean;
+    /** Recommended volume line to add to Dockge's own compose.yaml if not accessible */
+    recommendedDockgeMount?: string;
+}
+
+/**
+ * Result of inspecting a stack's compose.yaml for volumes, external dependencies, and mount accessibility.
+ */
+export interface StackVolumeInspectionResult {
+    stackName: string;
+    volumes: DetectedStackVolume[];
+    /** True if all volumes are accessible to Dockge */
+    allAccessible: boolean;
+    /** Subset of volumes that are NOT accessible inside Dockge */
+    missingMounts: DetectedStackVolume[];
+    /** Any volume source strings that still contain unexpanded $VAR or ${VAR} tokens */
+    unresolvedVariables: string[];
+    /** Ready-to-copy YAML snippet for Dockge's compose.yaml to mount the missing locations */
+    recommendedComposeSnippet?: string;
+    /** External Docker networks (`networks.<key>.external: true`) required by this stack */
+    externalNetworks: string[];
+    /** External Docker volumes (`volumes.<key>.external: true`) required by this stack */
+    externalVolumes: string[];
+    /** Ready-to-run CLI commands (`docker network create ...`, `docker volume create ...`) to run before starting the stack on a new host */
+    preStartCommands: string[];
+}
+
+/**
+ * Self-contained manifest written to `<stackDir>/.pbs-manifest.json` prior to backup.
+ * Allows restore operations to automatically recreate stack-owned named volumes (`docker volume create`),
+ * restore external archives to their exact host paths, and inform the user of any `external: true` dependencies.
+ */
+export interface PbsStackManifest {
+    version: 1;
+    stackName: string;
+    createdAt: string;
+    externalNetworks?: string[];
+    externalVolumes?: string[];
+    externalArchives: Array<{
+        kind: "named-volume" | "external-bind";
+        archiveName: string;
+        dockerVolumeName?: string;
+        isExternalResource?: boolean;
+        hostPath: string;
+        source: string;
+        target: string;
+    }>;
 }
 
 /**

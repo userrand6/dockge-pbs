@@ -65,7 +65,7 @@ export default {
             default: "idle",
         },
     },
-    emits: ["close", "clear-logs"],
+    emits: [ "close", "clear-logs" ],
     watch: {
         logs: {
             handler() {
@@ -85,7 +85,9 @@ export default {
     },
     methods: {
         formatTime(timestamp) {
-            if (!timestamp) return "";
+            if (!timestamp) {
+                return "";
+            }
             const d = new Date(timestamp);
             return d.toLocaleTimeString();
         },

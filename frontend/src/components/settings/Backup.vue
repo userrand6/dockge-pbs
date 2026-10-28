@@ -610,14 +610,16 @@ export default {
         loadPbsConfig() {
             this.$root.getSocket().emit("getPbsConfig", (res) => {
                 if (res.ok && res.data) {
-                    this.pbsConfig = { ...this.pbsConfig, ...res.data };
+                    this.pbsConfig = { ...this.pbsConfig,
+                        ...res.data };
                 }
             });
         },
         loadScheduleConfig() {
             this.$root.getSocket().emit("getPbsSchedule", (res) => {
                 if (res.ok && res.data) {
-                    this.scheduleConfig = { ...this.scheduleConfig, ...res.data };
+                    this.scheduleConfig = { ...this.scheduleConfig,
+                        ...res.data };
                     if (this.scheduleConfig.cron === "0 2 * * *") {
                         this.schedulePreset = "daily";
                     } else if (this.scheduleConfig.cron === "0 2 * * 0") {
@@ -732,13 +734,17 @@ export default {
             });
         },
         formatDate(dateStr) {
-            if (!dateStr) return "-";
+            if (!dateStr) {
+                return "-";
+            }
             return new Date(dateStr).toLocaleString();
         },
         formatSize(bytes) {
-            if (!bytes || bytes === 0) return "0 B";
+            if (!bytes || bytes === 0) {
+                return "0 B";
+            }
             const k = 1024;
-            const sizes = ["B", "KB", "MB", "GB", "TB"];
+            const sizes = [ "B", "KB", "MB", "GB", "TB" ];
             const i = Math.floor(Math.log(bytes) / Math.log(k));
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
         },

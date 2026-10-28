@@ -47,30 +47,19 @@ export const defaultProcessRunner: ProcessRunner = (command, args, options) => {
         proc.stdout?.on("data", (chunk: Buffer) => {
             const str = chunk.toString();
             stdout += str;
-            if (options.onStdout) {
-                options.onStdout(str);
-            }
+            options.onStdout?.(str);
         });
 
         proc.stderr?.on("data", (chunk: Buffer) => {
             const str = chunk.toString();
             stderr += str;
-            if (options.onStderr) {
-                options.onStderr(str);
-            }
+            options.onStderr?.(str);
         });
 
-        proc.on("error", (err) => {
-            reject(err);
-        });
-
-        proc.on("close", (code) => {
-            resolve({
-                code: code ?? 0,
-                stdout,
-                stderr,
-            });
-        });
+        proc.on("error", reject);
+        proc.on("close", (code) => resolve({ code: code ?? 0,
+            stdout,
+            stderr }));
     });
 };
 
@@ -137,6 +126,13 @@ export class PbsClient {
     }
 
     /**
+     * Appends `--ns <namespace>` when a PBS namespace is configured.
+     */
+    private withNamespace(args: string[]): string[] {
+        return this.config.namespace ? [ ...args, "--ns", this.config.namespace ] : args;
+    }
+
+    /**
      * Executes the PBS CLI binary with safe environment variables and progress handlers.
      */
     private async execute(
@@ -145,31 +141,18 @@ export class PbsClient {
         cwd?: string
     ): Promise<{ code: number; stdout: string; stderr: string }> {
         const env = this.getEnvironment();
-
         log.debug("pbs-client", `Executing: ${this.binaryPath} ${args.join(" ")}`);
 
         try {
             const result = await this.runner(this.binaryPath, args, {
                 env,
                 cwd,
-                onStdout: (chunk) => {
-                    if (onProgress) {
-                        onProgress({
-                            type: "stdout",
-                            text: chunk,
-                            timestamp: Date.now(),
-                        });
-                    }
-                },
-                onStderr: (chunk) => {
-                    if (onProgress) {
-                        onProgress({
-                            type: "stderr",
-                            text: chunk,
-                            timestamp: Date.now(),
-                        });
-                    }
-                },
+                onStdout: (text) => onProgress?.({ type: "stdout",
+                    text,
+                    timestamp: Date.now() }),
+                onStderr: (text) => onProgress?.({ type: "stderr",
+                    text,
+                    timestamp: Date.now() }),
             });
 
             if (result.code !== 0) {
@@ -194,12 +177,7 @@ export class PbsClient {
      * Returns true if connection succeeds, throws PbsClientError otherwise.
      */
     public async testConnection(): Promise<{ ok: boolean; message: string; version?: string }> {
-        const args = ["status", "--output-format", "json"];
-        if (this.config.namespace) {
-            args.push("--ns", this.config.namespace);
-        }
-
-        const res = await this.execute(args);
+        const res = await this.execute(this.withNamespace([ "status", "--output-format", "json" ]));
         return {
             ok: true,
             message: "Connection successful",
@@ -220,38 +198,27 @@ export class PbsClient {
         onProgress?: (event: PbsLogEvent) => void
     ): Promise<{ code: number; stdout: string }> {
         const id = backupId || this.config.backupId || "dockge";
-        const args = ["backup"];
-
-        for (const [archiveName, dirPath] of Object.entries(archives)) {
-            // E.g. "stacks.pxar:/opt/stacks"
-            args.push(`${archiveName}:${dirPath}`);
-        }
-
-        args.push("--backup-id", id);
-        args.push("--backup-type", "host");
-
-        if (this.config.namespace) {
-            args.push("--ns", this.config.namespace);
-        }
+        const archiveArgs = Object.entries(archives).map(([ name, dir ]) => `${name}:${dir}`);
+        const args = this.withNamespace([
+            "backup",
+            ...archiveArgs,
+            "--backup-id",
+            id,
+            "--backup-type",
+            "host",
+            "--change-detection-mode=metadata",
+        ]);
 
         const res = await this.execute(args, onProgress);
-        return {
-            code: res.code,
-            stdout: res.stdout,
-        };
+        return { code: res.code,
+            stdout: res.stdout };
     }
 
     /**
      * Retrieves the list of available snapshots from Proxmox Backup Server.
      */
     public async listSnapshots(): Promise<PbsSnapshot[]> {
-        const args = ["snapshot", "list", "--output-format", "json"];
-
-        if (this.config.namespace) {
-            args.push("--ns", this.config.namespace);
-        }
-
-        const res = await this.execute(args);
+        const res = await this.execute(this.withNamespace([ "snapshot", "list", "--output-format", "json" ]));
 
         try {
             const raw = JSON.parse(res.stdout);
@@ -259,24 +226,25 @@ export class PbsClient {
                 return [];
             }
 
-            return raw.map((item: any) => {
+            return raw.map((item: Partial<PbsSnapshot>) => {
                 const bType = item["backup-type"] || "host";
                 const bId = item["backup-id"] || "";
                 const bTime = item["backup-time"] || 0;
-                const snapId = `${bType}/${bId}/${new Date(bTime * 1000).toISOString()}`;
+                // PBS requires RFC3339 timestamps without milliseconds (e.g. "2026-10-28T20:53:26Z", NOT ".000Z")
+                const iso = new Date(bTime * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
 
                 return {
                     "backup-type": bType,
                     "backup-id": bId,
                     "backup-time": bTime,
-                    backupTimeISO: new Date(bTime * 1000).toISOString(),
+                    backupTimeISO: iso,
                     files: item.files || [],
                     size: item.size || 0,
-                    snapshotId: snapId,
+                    snapshotId: `${bType}/${bId}/${iso}`,
                     comment: item.comment || "",
                 };
             });
-        } catch (parseError) {
+        } catch {
             log.error("pbs-client", `Failed to parse snapshots JSON: ${res.stdout}`);
             throw new PbsClientError(`Invalid JSON response from PBS: ${res.stdout}`);
         }
@@ -296,17 +264,11 @@ export class PbsClient {
         targetDir: string,
         onProgress?: (event: PbsLogEvent) => void
     ): Promise<{ code: number; stdout: string }> {
-        const args = ["restore", snapshot, archiveName, targetDir];
-
-        if (this.config.namespace) {
-            args.push("--ns", this.config.namespace);
-        }
-
+        const cleanSnapshot = snapshot.replace(/\.\d{3}Z$/, "Z");
+        const args = this.withNamespace([ "restore", cleanSnapshot, archiveName, targetDir ]);
         const res = await this.execute(args, onProgress);
-        return {
-            code: res.code,
-            stdout: res.stdout,
-        };
+        return { code: res.code,
+            stdout: res.stdout };
     }
 
     /**
@@ -320,39 +282,29 @@ export class PbsClient {
         backupId?: string;
     }): Promise<{ code: number; stdout: string }> {
         const id = rules.backupId || this.config.backupId || "dockge";
-        const args = ["prune", `host/${id}`];
+        const args = [ "prune", `host/${id}` ];
 
-        if (rules.keepLast !== undefined && rules.keepLast > 0) {
-            args.push("--keep-last", String(rules.keepLast));
-        }
-        if (rules.keepDaily !== undefined && rules.keepDaily > 0) {
-            args.push("--keep-daily", String(rules.keepDaily));
-        }
-        if (rules.keepWeekly !== undefined && rules.keepWeekly > 0) {
-            args.push("--keep-weekly", String(rules.keepWeekly));
-        }
-        if (rules.keepMonthly !== undefined && rules.keepMonthly > 0) {
-            args.push("--keep-monthly", String(rules.keepMonthly));
-        }
-
-        if (this.config.namespace) {
-            args.push("--ns", this.config.namespace);
+        const flagMap: Array<[string, number | undefined]> = [
+            [ "--keep-last", rules.keepLast ],
+            [ "--keep-daily", rules.keepDaily ],
+            [ "--keep-weekly", rules.keepWeekly ],
+            [ "--keep-monthly", rules.keepMonthly ],
+        ];
+        for (const [ flag, val ] of flagMap) {
+            if (val !== undefined && val > 0) {
+                args.push(flag, String(val));
+            }
         }
 
-        return await this.execute(args);
+        return await this.execute(this.withNamespace(args));
     }
 
     /**
      * Forgets (deletes) a specific snapshot.
      */
     public async forget(snapshot: string): Promise<{ code: number; stdout: string }> {
-        const args = ["snapshot", "forget", snapshot];
-
-        if (this.config.namespace) {
-            args.push("--ns", this.config.namespace);
-        }
-
-        return await this.execute(args);
+        const cleanSnapshot = snapshot.replace(/\.\d{3}Z$/, "Z");
+        return await this.execute(this.withNamespace([ "snapshot", "forget", cleanSnapshot ]));
     }
 }
 

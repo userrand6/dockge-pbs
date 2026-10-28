@@ -1,4 +1,4 @@
-import test, { describe, it, before, after } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { PbsScheduler } from "../../backend/pbs/pbs-scheduler";
 import { pbsManager } from "../../backend/pbs/pbs-manager";
@@ -50,7 +50,7 @@ describe("PbsScheduler", () => {
                     includeDockgeData: true,
                 });
             },
-            (err: any) => err.message.includes("Invalid cron expression")
+            (err: Error) => err.message.includes("Invalid cron expression")
         );
     });
 

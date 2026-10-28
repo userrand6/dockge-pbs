@@ -1,9 +1,19 @@
-import test, { describe, it, before, after } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { PbsSocketHandler } from "../../backend/socket-handlers/pbs-socket-handler";
 import { pbsManager } from "../../backend/pbs/pbs-manager";
 import { MockPbsRunner } from "./mock-pbs-runner";
 import { setupTestDb, cleanupTestDb } from "./test-db-setup";
+import { DockgeServer } from "../../backend/dockge-server";
+import { DockgeSocket } from "../../backend/util-server";
+import { PbsConfig } from "../../backend/pbs/pbs-types";
+
+type SocketEventFn = (...args: unknown[]) => unknown;
+interface SocketResponse {
+    ok: boolean;
+    msg?: string;
+    data?: PbsConfig;
+}
 
 describe("PbsSocketHandler", () => {
     const handler = new PbsSocketHandler();
@@ -17,20 +27,20 @@ describe("PbsSocketHandler", () => {
     });
 
     it("should reject unauthenticated socket calls with unauthorized error", async () => {
-        const events: Record<string, Function> = {};
+        const events: Record<string, SocketEventFn> = {};
         const mockSocket = {
-            on: (name: string, fn: Function) => {
+            on: (name: string, fn: SocketEventFn) => {
                 events[name] = fn;
             },
             emit: () => {},
             userId: undefined, // Not logged in!
-        } as any;
+        } as unknown as DockgeSocket;
 
-        handler.create(mockSocket, {} as any);
+        handler.create(mockSocket, {} as unknown as DockgeServer);
 
         // Call getPbsConfig without auth
-        let callbackResult: any;
-        await events["getPbsConfig"]((res: any) => {
+        let callbackResult: SocketResponse | undefined;
+        await events["getPbsConfig"]((res: SocketResponse) => {
             callbackResult = res;
         });
 
@@ -58,20 +68,20 @@ describe("PbsSocketHandler", () => {
             secret: "ultra-confidential-token-999",
         });
 
-        const events: Record<string, Function> = {};
+        const events: Record<string, SocketEventFn> = {};
         const mockSocket = {
-            on: (name: string, fn: Function) => {
+            on: (name: string, fn: SocketEventFn) => {
                 events[name] = fn;
             },
             emit: () => {},
             userID: 1, // Authenticated user (Dockge uses capital ID)
-        } as any;
+        } as unknown as DockgeSocket;
 
-        handler.create(mockSocket, {} as any);
+        handler.create(mockSocket, {} as unknown as DockgeServer);
 
         // 1. Fetch config
-        let getResult: any;
-        await events["getPbsConfig"]((res: any) => {
+        let getResult: SocketResponse | undefined;
+        await events["getPbsConfig"]((res: SocketResponse) => {
             getResult = res;
         });
 
@@ -79,12 +89,12 @@ describe("PbsSocketHandler", () => {
         assert.equal(getResult?.data?.secret, "********", "Secret must be masked in socket response");
 
         // 2. Submit form back with the masked secret
-        let saveResult: any;
+        let saveResult: SocketResponse | undefined;
         await events["savePbsConfig"]({
-            ...getResult.data,
+            ...getResult?.data,
             host: "updated-pbs.domain.com",
             secret: "********", // User kept the masked placeholder
-        }, (res: any) => {
+        }, (res: SocketResponse) => {
             saveResult = res;
         });
 

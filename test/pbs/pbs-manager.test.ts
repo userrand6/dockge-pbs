@@ -1,12 +1,14 @@
-import test, { describe, it, beforeEach, after } from "node:test";
+import { describe, it, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
-import fs, { promises as fsAsync } from "fs";
+import { promises as fsAsync } from "fs";
 import path from "path";
 import os from "os";
 import { PbsManager } from "../../backend/pbs/pbs-manager";
 import { MockPbsRunner } from "./mock-pbs-runner";
 import { PbsConfig } from "../../backend/pbs/pbs-types";
 import { setupTestDb, cleanupTestDb } from "./test-db-setup";
+import { DockgeServer } from "../../backend/dockge-server";
+import { ProcessRunner } from "../../backend/pbs/pbs-client";
 
 describe("PbsManager", () => {
     let manager: PbsManager;
@@ -27,6 +29,7 @@ describe("PbsManager", () => {
         manager = PbsManager.getInstance();
         mockRunner = new MockPbsRunner();
         manager.setCustomRunner(mockRunner.getRunner());
+        manager.setVolumeTestOverrides(null, undefined);
 
         // Create temporary stacks directory
         tempStacksDir = path.join(os.tmpdir(), `test-stacks-${Date.now()}`);
@@ -39,7 +42,7 @@ describe("PbsManager", () => {
         manager.setServer({
             stacksDir: tempStacksDir,
             sendStackList: () => {},
-        } as any);
+        } as unknown as DockgeServer);
     });
 
     after(async () => {
@@ -59,11 +62,13 @@ describe("PbsManager", () => {
         // Setup a long-running response
         let resolveBackup: () => void;
         const backupPromise = new Promise<{ code: number; stdout: string; stderr: string }>((res) => {
-            resolveBackup = () => res({ code: 0, stdout: "done", stderr: "" });
+            resolveBackup = () => res({ code: 0,
+                stdout: "done",
+                stderr: "" });
         });
 
-        const customRunner = async () => backupPromise;
-        manager.setCustomRunner(customRunner as any);
+        const customRunner: ProcessRunner = async () => backupPromise;
+        manager.setCustomRunner(customRunner);
 
         // Start first backup (in background)
         const run1 = manager.startBackup();
@@ -76,13 +81,13 @@ describe("PbsManager", () => {
         // Attempting a second backup should immediately reject with a lock error
         await assert.rejects(
             async () => await manager.startBackup(),
-            (err: any) => err.message.includes("Another PBS operation is already in progress")
+            (err: Error) => err.message.includes("Another PBS operation is already in progress")
         );
 
         // Attempting a restore should also reject
         await assert.rejects(
             async () => await manager.startRestore({ snapshot: "host/dockge/2026-10-28T00:00:00Z" }),
-            (err: any) => err.message.includes("Another PBS operation is already in progress")
+            (err: Error) => err.message.includes("Another PBS operation is already in progress")
         );
 
         // Resolve first backup
@@ -129,9 +134,13 @@ describe("PbsManager", () => {
                 const extractedStackDir = path.join(targetDir, "nginx-app");
                 await fsAsync.mkdir(extractedStackDir, { recursive: true });
                 await fsAsync.writeFile(path.join(extractedStackDir, "compose.yaml"), "# Restored Nginx\n");
-                return { code: 0, stdout: "Extracted", stderr: "" };
+                return { code: 0,
+                    stdout: "Extracted",
+                    stderr: "" };
             }
-            return { code: 0, stdout: "", stderr: "" };
+            return { code: 0,
+                stdout: "",
+                stderr: "" };
         });
 
         await manager.startRestore({
@@ -154,7 +163,7 @@ describe("PbsManager", () => {
         const originalEnv = { ...process.env };
         try {
             // Clear DB config
-            await manager.saveConfig({} as any);
+            await manager.saveConfig({} as unknown as PbsConfig);
 
             process.env.PBS_HOST = "env-pbs.local";
             process.env.PBS_PORT = "8008";
@@ -175,6 +184,208 @@ describe("PbsManager", () => {
         } finally {
             process.env = originalEnv;
         }
+    });
+
+    it("should block incomplete backup when unmounted volumes exist unless allowIncompleteBackup is true", async () => {
+        const mockVolumesRoot = path.join(os.tmpdir(), `pbs-mgr-vols-${Date.now()}`);
+        const stackDir = path.join(tempStacksDir, "pg-app");
+        await fsAsync.mkdir(stackDir, { recursive: true });
+        await fsAsync.writeFile(
+            path.join(stackDir, "compose.yaml"),
+            "services:\n  db:\n    image: postgres:16\n    volumes:\n      - pg_data:/var/lib/postgresql/data\nvolumes:\n  pg_data:\n"
+        );
+
+        // Simulate running inside a Dockge container where /var/lib/docker/volumes is NOT mounted
+        manager.setVolumeTestOverrides([ tempStacksDir ], mockVolumesRoot);
+        mockRunner.setResponse("config", 1, "", "use static fallback");
+        mockRunner.setResponse("inspect", 1, "", "use fallback path");
+        mockRunner.setResponse("backup", 0, "Backup done", "");
+
+        await assert.rejects(
+            async () => await manager.startBackup({ stackName: "pg-app" }),
+            (err: Error) => err.message.includes("Incomplete backup blocked") && err.message.includes("pg_data")
+        );
+
+        // Now explicitly allow incomplete backup
+        const res = await manager.startBackup({
+            stackName: "pg-app",
+            allowIncompleteBackup: true,
+        });
+        assert.equal(res.ok, true);
+    });
+
+    it("should archive named volumes into separate .pxar files and restore them with docker volume create", async () => {
+        const mockVolumesRoot = path.join(os.tmpdir(), `pbs-mgr-volrestore-${Date.now()}`);
+        const volDataDir = path.join(mockVolumesRoot, "pg-app_pg_data", "_data");
+        const stackDir = path.join(tempStacksDir, "pg-app");
+
+        await fsAsync.mkdir(stackDir, { recursive: true });
+        await fsAsync.mkdir(volDataDir, { recursive: true });
+        await fsAsync.writeFile(path.join(volDataDir, "PG_VERSION"), "16\n");
+        await fsAsync.writeFile(
+            path.join(stackDir, "compose.yaml"),
+            "services:\n  db:\n    image: postgres:16\n    volumes:\n      - pg_data:/var/lib/postgresql/data\nvolumes:\n  pg_data:\n"
+        );
+
+        // Simulate container with both stacks and volumes root mounted
+        manager.setVolumeTestOverrides([ tempStacksDir, mockVolumesRoot ], mockVolumesRoot);
+
+        const executedCommands: Array<{ cmd: string; args: string[] }> = [];
+        let capturedManifestJson = "";
+
+        manager.setCustomRunner(async (cmd, args) => {
+            executedCommands.push({ cmd,
+                args });
+
+            if (cmd === "docker" && args.includes("config")) {
+                return { code: 1,
+                    stdout: "",
+                    stderr: "fallback" };
+            }
+            if (cmd === "docker" && args.includes("inspect")) {
+                return { code: 0,
+                    stdout: `${volDataDir}\n`,
+                    stderr: "" };
+            }
+            if (cmd === "proxmox-backup-client" && args[0] === "backup") {
+                // Capture the manifest written inside stackDir before backup
+                capturedManifestJson = await fsAsync.readFile(
+                    path.join(stackDir, ".pbs-manifest.json"),
+                    "utf-8"
+                );
+                return { code: 0,
+                    stdout: "Uploaded 2 archives",
+                    stderr: "" };
+            }
+            if (cmd === "proxmox-backup-client" && args[0] === "restore") {
+                const archiveArg = args[2];
+                const destArg = args[3];
+                if (archiveArg === "pg-app.pxar") {
+                    await fsAsync.mkdir(destArg, { recursive: true });
+                    await fsAsync.writeFile(path.join(destArg, "compose.yaml"), "# Restored pg-app\n");
+                    await fsAsync.writeFile(path.join(destArg, ".pbs-manifest.json"), capturedManifestJson);
+                } else if (archiveArg === "vol-pg-app-pg_data.pxar") {
+                    await fsAsync.mkdir(destArg, { recursive: true });
+                    await fsAsync.writeFile(path.join(destArg, "PG_VERSION"), "16-restored\n");
+                }
+                return { code: 0,
+                    stdout: "Restored",
+                    stderr: "" };
+            }
+            return { code: 0,
+                stdout: "",
+                stderr: "" };
+        });
+
+        // 1. Run Backup
+        await manager.startBackup({ stackName: "pg-app" });
+
+        const backupCall = executedCommands.find(
+            (c) => c.cmd === "proxmox-backup-client" && c.args[0] === "backup"
+        );
+        assert.ok(backupCall, "proxmox-backup-client backup must be called");
+        assert.ok(
+            backupCall.args.some((a) => a.startsWith("pg-app.pxar:")),
+            "Should include stack archive pg-app.pxar"
+        );
+        assert.ok(
+            backupCall.args.some((a) => a.startsWith("vol-pg-app-pg_data.pxar:")),
+            "Should include named volume archive vol-pg-app-pg_data.pxar"
+        );
+
+        // 2. Run Restore
+        await manager.startRestore({
+            snapshot: "host/dockge/2026-10-28T02:00:00Z",
+            archiveName: "pg-app.pxar",
+            stackName: "pg-app",
+            restoreVolumes: true,
+        });
+
+        // Verify `docker volume create pg-app_pg_data` was executed prior to volume extraction
+        const volCreateCall = executedCommands.find(
+            (c) => c.cmd === "docker" && c.args[0] === "volume" && c.args[1] === "create"
+        );
+        assert.ok(volCreateCall, "docker volume create must be called during restore");
+        assert.equal(volCreateCall.args[2], "pg-app_pg_data");
+
+        // Verify the volume content was restored
+        const restoredPgVersion = await fsAsync.readFile(path.join(volDataDir, "PG_VERSION"), "utf-8");
+        assert.equal(restoredPgVersion, "16-restored\n");
+
+        await fsAsync.rm(mockVolumesRoot, { recursive: true,
+            force: true }).catch(() => {});
+    });
+
+    it("should run global backups sequentially on a per-stack basis, skipping disabled stacks and avoiding shared volume collisions", async () => {
+        const mockVolumesRoot = path.join(os.tmpdir(), `pbs-mgr-global-${Date.now()}`);
+        const sharedVolDir = path.join(mockVolumesRoot, "shared_media", "_data");
+        await fsAsync.mkdir(sharedVolDir, { recursive: true });
+
+        // Create 3 stacks: stack-a (enabled), stack-b (enabled, shares external volume with stack-a), stack-c (disabled)
+        const stackADir = path.join(tempStacksDir, "stack-a");
+        const stackBDir = path.join(tempStacksDir, "stack-b");
+        const stackCDir = path.join(tempStacksDir, "stack-c");
+        await fsAsync.mkdir(stackADir, { recursive: true });
+        await fsAsync.mkdir(stackBDir, { recursive: true });
+        await fsAsync.mkdir(stackCDir, { recursive: true });
+
+        const sharedCompose = `services:
+  app:
+    image: nginx
+    volumes:
+      - shared_media:/media
+volumes:
+  shared_media:
+    external: true
+`;
+        await fsAsync.writeFile(path.join(stackADir, "compose.yaml"), sharedCompose);
+        await fsAsync.writeFile(path.join(stackBDir, "compose.yaml"), sharedCompose);
+        await fsAsync.writeFile(path.join(stackCDir, "compose.yaml"), sharedCompose);
+
+        await manager.saveConfig({ ...dummyConfig,
+            backupId: "myhost" });
+        await manager.saveStackConfig("stack-c", {
+            enabled: false,
+            containerMode: "none",
+            cron: "",
+            includeVolumes: true,
+        });
+
+        manager.setVolumeTestOverrides([ tempStacksDir, mockVolumesRoot ], mockVolumesRoot);
+
+        const pbsBackupCalls: string[][] = [];
+        manager.setCustomRunner(async (cmd, args) => {
+            if (cmd === "docker" && args.includes("config")) {
+                return { code: 1,
+                    stdout: "",
+                    stderr: "fallback" };
+            }
+            if (cmd === "docker" && args.includes("inspect")) {
+                return { code: 0,
+                    stdout: `${sharedVolDir}\n`,
+                    stderr: "" };
+            }
+            if (cmd === "proxmox-backup-client" && args[0] === "backup") {
+                pbsBackupCalls.push(args);
+                return { code: 0,
+                    stdout: "Uploaded",
+                    stderr: "" };
+            }
+            return { code: 0,
+                stdout: "",
+                stderr: "" };
+        });
+
+        // Execute Global Backup (no stackName passed)
+        await manager.startBackup({ includeDockgeData: false });
+
+        // Should have executed exactly 2 sequential backup calls (stack-a and stack-b; stack-c skipped)
+        assert.equal(pbsBackupCalls.length, 2);
+        assert.ok(pbsBackupCalls[0].includes("myhost-stack-a"));
+        assert.ok(pbsBackupCalls[1].includes("myhost-stack-b"));
+
+        await fsAsync.rm(mockVolumesRoot, { recursive: true,
+            force: true }).catch(() => {});
     });
 });
 

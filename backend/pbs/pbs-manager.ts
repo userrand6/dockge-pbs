@@ -12,7 +12,10 @@ import {
     PbsManagerStatus,
     PbsSnapshot,
     RestoreOptions,
+    StackBackupConfig,
+    StackVolumeInspectionResult,
 } from "./pbs-types";
+import { PbsVolumeInspector } from "./pbs-volume-inspector";
 import childProcessAsync from "promisify-child-process";
 
 /**
@@ -21,7 +24,8 @@ import childProcessAsync from "promisify-child-process";
  * Manages:
  * - Mutual exclusion lock (preventing concurrent backup/restores).
  * - Container state transitions (pause / stop / resume with guaranteed cleanup).
- * - Directory packaging and target sanitization.
+ * - Compose volume inspection (named volumes & external bind mounts) via `PbsVolumeInspector`.
+ * - Multi-pxar archiving and self-contained `.pbs-manifest.json` volume restoration.
  * - Live log event broadcasting to Web UI.
  */
 export class PbsManager {
@@ -29,6 +33,8 @@ export class PbsManager {
 
     private server?: DockgeServer;
     private customRunner?: ProcessRunner;
+    private customContainerMounts?: string[] | null;
+    private customVolumesRoot?: string;
 
     // Operation Mutex State
     private _isOperating = false;
@@ -69,6 +75,25 @@ export class PbsManager {
     }
 
     /**
+     * Override container mount detection and volumes root for unit testing.
+     */
+    public setVolumeTestOverrides(containerMounts?: string[] | null, volumesRoot?: string) {
+        this.customContainerMounts = containerMounts;
+        this.customVolumesRoot = volumesRoot;
+    }
+
+    /**
+     * Instantiates a PbsVolumeInspector bound to current test/runtime settings.
+     */
+    public getVolumeInspector(): PbsVolumeInspector {
+        return new PbsVolumeInspector(
+            this.customRunner,
+            this.customContainerMounts,
+            this.customVolumesRoot
+        );
+    }
+
+    /**
      * Retrieves PBS connection configuration from Dockge database,
      * merging or falling back to environment variables (e.g. PBS_HOST, PBS_FINGERPRINT).
      */
@@ -103,6 +128,68 @@ export class PbsManager {
      */
     public async saveConfig(config: PbsConfig): Promise<void> {
         await Settings.set("pbs_config", config);
+    }
+
+    /**
+     * Retrieves per-stack backup settings from Dockge database.
+     */
+    public async getStackConfig(stackName: string): Promise<StackBackupConfig> {
+        const cleanStack = this.sanitizeStackName(stackName);
+        const allConfigs = await Settings.get("pbs_stack_configs");
+        if (allConfigs && typeof allConfigs === "object" && allConfigs[cleanStack]) {
+            return {
+                enabled: true,
+                containerMode: "none",
+                cron: "",
+                includeVolumes: true,
+                ...allConfigs[cleanStack],
+            };
+        }
+        return {
+            enabled: true,
+            containerMode: "none",
+            cron: "",
+            includeVolumes: true,
+        };
+    }
+
+    /**
+     * Saves per-stack backup settings to Dockge database.
+     */
+    public async saveStackConfig(stackName: string, config: StackBackupConfig): Promise<void> {
+        const cleanStack = this.sanitizeStackName(stackName);
+        const raw = await Settings.get("pbs_stack_configs");
+        const allConfigs: Record<string, StackBackupConfig> =
+            raw && typeof raw === "object" ? { ...raw } : {};
+
+        allConfigs[cleanStack] = {
+            enabled: Boolean(config.enabled),
+            containerMode: config.containerMode || "none",
+            cron: config.cron ? String(config.cron).trim() : "",
+            includeVolumes: config.includeVolumes !== false,
+        };
+
+        await Settings.set("pbs_stack_configs", allConfigs);
+    }
+
+    /**
+     * Resolves the root directory where Dockge stacks are stored.
+     */
+    private getStacksDir(overrideDir?: string): string {
+        if (overrideDir) {
+            return overrideDir;
+        }
+        return this.server ? this.server.stacksDir : process.env.DOCKGE_STACKS_DIR || "/opt/stacks";
+    }
+
+    /**
+     * Inspects a stack's compose.yaml to detect named volumes and external bind mounts,
+     * and checks whether they are currently mounted/accessible inside Dockge.
+     */
+    public async inspectStackVolumes(stackName: string): Promise<StackVolumeInspectionResult> {
+        const cleanStack = this.sanitizeStackName(stackName);
+        const stackDir = path.join(this.getStacksDir(), cleanStack);
+        return await this.getVolumeInspector().inspectStack(cleanStack, stackDir);
     }
 
     /**
@@ -141,7 +228,7 @@ export class PbsManager {
      * Returns buffered recent log lines.
      */
     public getRecentLogs(): PbsLogEvent[] {
-        return [...this.recentLogs];
+        return [ ...this.recentLogs ];
     }
 
     /**
@@ -156,10 +243,19 @@ export class PbsManager {
         for (const listener of this.logListeners) {
             try {
                 listener(event);
-            } catch (err) {
+            } catch {
                 // Ignore listener exceptions
             }
         }
+    }
+
+    /**
+     * Shorthand helper to emit a timestamped log message.
+     */
+    private logProgress(type: PbsLogEvent["type"], text: string) {
+        this.emitLog({ type,
+            text,
+            timestamp: Date.now() });
     }
 
     /**
@@ -200,7 +296,12 @@ export class PbsManager {
      */
     private async runCompose(stackDir: string, ...args: string[]): Promise<void> {
         try {
-            await childProcessAsync.spawn("docker", ["compose", ...args], {
+            if (this.customRunner) {
+                await this.customRunner("docker", [ "compose", ...args ], { env: process.env,
+                    cwd: stackDir });
+                return;
+            }
+            await childProcessAsync.spawn("docker", [ "compose", ...args ], {
                 cwd: stackDir,
                 encoding: "utf-8",
             });
@@ -210,92 +311,212 @@ export class PbsManager {
     }
 
     /**
-     * Starts a backup of Dockge stacks to Proxmox Backup Server.
+     * Builds a PBS-compliant backup-id (`[a-zA-Z0-9_-]+`) for a specific stack or system archive.
+     */
+    public buildStackBackupId(baseBackupId: string, stackName: string): string {
+        const cleanBase = (baseBackupId || "dockge").replace(/[^a-zA-Z0-9_-]/g, "_");
+        const cleanStack = stackName.replace(/[^a-zA-Z0-9_-]/g, "_");
+        return `${cleanBase}-${cleanStack}`;
+    }
+
+    /**
+     * Backs up a single stack (and its named/external volumes) as an isolated PBS snapshot
+     * under `<baseBackupId>-<stackName>`.
+     *
+     * Why per-stack snapshots:
+     *   1. Container downtime (`pause`/`stop`) is limited to a single stack for a few seconds,
+     *      rather than taking all stacks offline for the entire backup window.
+     *   2. Avoids duplicate target path collisions when two stacks share an `external: true` volume.
+     *   3. Preserves 100% of PBS chunk deduplication across the datastore while giving each stack
+     *      its own snapshot timeline.
+     */
+    private async backupSingleStack(
+        client: PbsClient,
+        baseBackupId: string,
+        stackName: string,
+        stackDir: string,
+        options: BackupOptions
+    ): Promise<void> {
+        const containerMode = options.containerMode || "none";
+        const includeVolumes = options.includeVolumes !== false;
+        const inspector = this.getVolumeInspector();
+        const stackBackupId = this.buildStackBackupId(baseBackupId, stackName);
+
+        let inspection: StackVolumeInspectionResult | undefined;
+        const archives: Record<string, string> = {
+            [`${stackName}.pxar`]: stackDir,
+        };
+
+        // Step 1: Inspect stack volumes and write `.pbs-manifest.json` before stopping containers
+        if (includeVolumes) {
+            inspection = await inspector.inspectStack(stackName, stackDir);
+
+            if (!inspection.allAccessible) {
+                const missingList = inspection.missingMounts
+                    .map((m) => `${stackName} -> ${m.source} (${m.hostPath})`)
+                    .join(", ");
+
+                if (!options.allowIncompleteBackup) {
+                    const snippet = inspection.recommendedComposeSnippet
+                        ? `\nAdd the following to your Dockge compose.yaml:\n${inspection.recommendedComposeSnippet}`
+                        : "";
+                    throw new Error(
+                        `Incomplete backup blocked: Unmounted volume paths detected (${missingList}).${snippet}`
+                    );
+                }
+
+                this.logProgress(
+                    "info",
+                    `[PBS Backup Warning] Proceeding with incomplete backup for "${stackName}" (skipping unmounted paths: ${missingList})\n`
+                );
+            }
+
+            if (inspection.preStartCommands.length > 0) {
+                this.logProgress(
+                    "info",
+                    `[PBS Backup Note] Stack "${stackName}" uses external resources. Before starting on a new host, run: ${inspection.preStartCommands.join(" && ")}\n`
+                );
+            }
+
+            const manifest = await inspector.writeStackManifest(
+                stackName,
+                stackDir,
+                inspection.volumes,
+                inspection.externalNetworks,
+                inspection.externalVolumes
+            );
+
+            for (const ext of manifest.externalArchives) {
+                archives[ext.archiveName] = ext.hostPath;
+                this.logProgress(
+                    "info",
+                    `[PBS Backup] Including ${ext.kind} "${ext.source}" (${ext.hostPath}) as ${ext.archiveName}\n`
+                );
+            }
+        }
+
+        // Step 2: Execute Final Pre-Flight Sanity Check BEFORE pausing/stopping this stack's containers
+        inspector.validateBackupPlan(
+            archives,
+            inspection ? [ inspection ] : [],
+            Boolean(options.allowIncompleteBackup)
+        );
+
+        // Step 3: Pause/stop ONLY this stack, upload to PBS, and immediately resume in `finally`
+        let appliedAction: "pause" | "stop" | null = null;
+        try {
+            if (containerMode === "pause" || containerMode === "stop") {
+                this.logProgress("info", `[PBS Backup] Applying ${containerMode} to stack "${stackName}"...\n`);
+                await this.runCompose(stackDir, containerMode);
+                appliedAction = containerMode;
+            }
+
+            this.logProgress(
+                "info",
+                `[PBS Backup] Uploading stack "${stackName}" (${Object.keys(archives).length} archive(s), backup-id: ${stackBackupId}) to ${client.getRepositoryString()}...\n`
+            );
+
+            await client.backup(archives, stackBackupId, (event) => this.emitLog(event));
+        } finally {
+            if (appliedAction === "pause") {
+                this.logProgress("info", `[PBS Backup] Resuming stack "${stackName}" (unpause)...\n`);
+                await this.runCompose(stackDir, "unpause");
+            } else if (appliedAction === "stop") {
+                this.logProgress("info", `[PBS Backup] Restarting stack "${stackName}" (start)...\n`);
+                await this.runCompose(stackDir, "start");
+            }
+        }
+    }
+
+    /**
+     * Starts a backup of Dockge stacks (and their named/external volumes) to Proxmox Backup Server.
+     *
+     * - When `options.stackName` is provided: backs up only that stack under `<baseBackupId>-<stackName>`.
+     * - When `options.stackName` is omitted (Global Backup): iterates through all enabled stacks
+     *   sequentially on a per-stack basis so only one stack is paused/stopped at a time and shared
+     *   external volumes never collide in a single command invocation.
      */
     public async startBackup(options: BackupOptions = {}): Promise<{ ok: boolean; message: string }> {
         this.acquireLock("backup");
 
-        const client = await this.getClient();
-        const stacksDir = this.server ? this.server.stacksDir : process.env.DOCKGE_STACKS_DIR || "/opt/stacks";
+        const config = await this.getConfig();
+        const client = await this.getClient(config);
+        const baseBackupId = config.backupId || os.hostname() || "dockge";
+        const stacksDir = this.getStacksDir();
         const containerMode = options.containerMode || "none";
-        const pausedOrStoppedStacks: Array<{ dir: string; action: "pause" | "stop" }> = [];
+        const includeVolumes = options.includeVolumes !== false;
+        const inspector = this.getVolumeInspector();
 
-        this.emitLog({
-            type: "info",
-            text: `[PBS Backup] Starting backup (Mode: ${containerMode}, Include Dockge Data: ${options.includeDockgeData !== false})\n`,
-            timestamp: Date.now(),
-        });
+        this.logProgress(
+            "info",
+            `[PBS Backup] Starting backup (Mode: ${containerMode}, Include Volumes: ${includeVolumes}, Include Dockge Data: ${options.includeDockgeData !== false})\n`
+        );
 
         try {
-            // Step 1: Pre-backup container state transitions if requested
-            if (containerMode === "pause" || containerMode === "stop") {
-                this.emitLog({
-                    type: "info",
-                    text: `[PBS Backup] Applying ${containerMode} to running containers before archiving...\n`,
-                    timestamp: Date.now(),
-                });
-
-                if (fs.existsSync(stacksDir)) {
-                    const entries = await fsAsync.readdir(stacksDir, { withFileTypes: true });
-                    for (const entry of entries) {
-                        if (entry.isDirectory()) {
-                            const stackPath = path.join(stacksDir, entry.name);
-                            if (options.stackName && entry.name !== options.stackName) {
-                                continue;
-                            }
-
-                            if (containerMode === "pause") {
-                                await this.runCompose(stackPath, "pause");
-                                pausedOrStoppedStacks.push({ dir: stackPath, action: "pause" });
-                            } else if (containerMode === "stop") {
-                                await this.runCompose(stackPath, "stop");
-                                pausedOrStoppedStacks.push({ dir: stackPath, action: "stop" });
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Step 2: Build archive list
-            const archives: Record<string, string> = {};
-
             if (options.stackName) {
                 const cleanStack = this.sanitizeStackName(options.stackName);
                 const targetStackDir = path.join(stacksDir, cleanStack);
                 if (!fs.existsSync(targetStackDir)) {
                     throw new Error(`Stack directory does not exist: ${targetStackDir}`);
                 }
-                archives[`${cleanStack}.pxar`] = targetStackDir;
+
+                await this.backupSingleStack(client, baseBackupId, cleanStack, targetStackDir, {
+                    ...options,
+                    containerMode,
+                    includeVolumes,
+                });
             } else {
                 if (!fs.existsSync(stacksDir)) {
                     await fsAsync.mkdir(stacksDir, { recursive: true });
                 }
-                archives["stacks.pxar"] = stacksDir;
+
+                const entries = await fsAsync.readdir(stacksDir, { withFileTypes: true });
+                const stackDirs = entries
+                    .filter((e) => e.isDirectory() && !e.name.includes(".bak-"))
+                    .map((e) => ({ name: e.name,
+                        dir: path.join(stacksDir, e.name) }));
+
+                let backedUpCount = 0;
+
+                for (const stack of stackDirs) {
+                    const stackCfg = await this.getStackConfig(stack.name);
+                    if (!stackCfg.enabled) {
+                        this.logProgress(
+                            "info",
+                            `[PBS Backup] Skipping stack "${stack.name}" (disabled in per-stack backup settings).\n`
+                        );
+                        continue;
+                    }
+
+                    await this.backupSingleStack(client, baseBackupId, stack.name, stack.dir, {
+                        ...options,
+                        stackName: stack.name,
+                        containerMode: options.containerMode || stackCfg.containerMode || "none",
+                        includeVolumes: options.includeVolumes ?? stackCfg.includeVolumes !== false,
+                    });
+                    backedUpCount++;
+                }
+
+                // Back up Dockge internal SQLite DB (`/app/data`) or empty stacksDir fallback
+                const dockgeDataDir = "/app/data";
+                if (options.includeDockgeData !== false && fs.existsSync(dockgeDataDir)) {
+                    const sysArchives = { "dockge-data.pxar": dockgeDataDir };
+                    inspector.validateBackupPlan(sysArchives, [], true);
+                    await client.backup(
+                        sysArchives,
+                        this.buildStackBackupId(baseBackupId, "system"),
+                        (event) => this.emitLog(event)
+                    );
+                } else if (backedUpCount === 0) {
+                    // Fallback when /opt/stacks has no enabled stacks yet: archive stacksDir directly
+                    const fallbackArchives = { "stacks.pxar": stacksDir };
+                    inspector.validateBackupPlan(fallbackArchives, [], true);
+                    await client.backup(fallbackArchives, baseBackupId, (event) => this.emitLog(event));
+                }
             }
-
-            // Optional: Include Dockge internal SQLite DB
-            const dockgeDataDir = "/app/data";
-            if (options.includeDockgeData !== false && fs.existsSync(dockgeDataDir) && !options.stackName) {
-                archives["dockge-data.pxar"] = dockgeDataDir;
-            }
-
-            // Step 3: Run pxar backup via PbsClient
-            this.emitLog({
-                type: "info",
-                text: `[PBS Backup] Uploading deduplicated pxar streams to PBS repository: ${client.getRepositoryString()}...\n`,
-                timestamp: Date.now(),
-            });
-
-            await client.backup(archives, undefined, (event) => {
-                this.emitLog(event);
-            });
 
             const successMsg = `Backup completed successfully at ${new Date().toLocaleString()}`;
-            this.emitLog({
-                type: "done",
-                text: `[PBS Backup] ${successMsg}\n`,
-                timestamp: Date.now(),
-            });
+            this.logProgress("done", `[PBS Backup] ${successMsg}\n`);
 
             await Settings.set("pbs_last_backup", {
                 timestamp: new Date().toISOString(),
@@ -303,15 +524,12 @@ export class PbsManager {
                 message: successMsg,
             });
 
-            return { ok: true, message: successMsg };
+            return { ok: true,
+                message: successMsg };
 
         } catch (error) {
             const errorMsg = error instanceof Error ? error.message : String(error);
-            this.emitLog({
-                type: "error",
-                text: `[PBS Backup Error] ${errorMsg}\n`,
-                timestamp: Date.now(),
-            });
+            this.logProgress("error", `[PBS Backup Error] ${errorMsg}\n`);
 
             await Settings.set("pbs_last_backup", {
                 timestamp: new Date().toISOString(),
@@ -322,29 +540,13 @@ export class PbsManager {
             throw error;
 
         } finally {
-            // Step 4: GUARANTEED RESUMPTION of containers
-            if (pausedOrStoppedStacks.length > 0) {
-                this.emitLog({
-                    type: "info",
-                    text: "[PBS Backup] Restoring container states (unpause/start)...\n",
-                    timestamp: Date.now(),
-                });
-
-                for (const item of pausedOrStoppedStacks) {
-                    if (item.action === "pause") {
-                        await this.runCompose(item.dir, "unpause");
-                    } else if (item.action === "stop") {
-                        await this.runCompose(item.dir, "start");
-                    }
-                }
-            }
-
             this.releaseLock();
         }
     }
 
     /**
-     * Restores stacks from a snapshot.
+     * Restores stacks (and any associated named/external volumes recorded in `.pbs-manifest.json`)
+     * from a PBS snapshot.
      */
     public async startRestore(options: RestoreOptions): Promise<{ ok: boolean; message: string }> {
         if (!options.snapshot) {
@@ -354,110 +556,162 @@ export class PbsManager {
         this.acquireLock("restore");
 
         const client = await this.getClient();
-        const stacksDir = options.targetDir || (this.server ? this.server.stacksDir : process.env.DOCKGE_STACKS_DIR || "/opt/stacks");
-        const archiveName = options.archiveName || "stacks.pxar";
+        const stacksDir = this.getStacksDir(options.targetDir);
+        const restoreVolumes = options.restoreVolumes !== false;
+        const inspector = this.getVolumeInspector();
 
-        this.emitLog({
-            type: "info",
-            text: `[PBS Restore] Initiating restore from snapshot: ${options.snapshot}\n`,
-            timestamp: Date.now(),
-        });
+        this.logProgress("info", `[PBS Restore] Initiating restore from snapshot: ${options.snapshot}\n`);
 
         try {
+            const restoredStackDirs: string[] = [];
+
             if (options.stackName) {
-                // SELECTIVE RESTORE: Restore to a temporary folder, then move only the requested stack
+                // SELECTIVE RESTORE: Restore a single stack
                 const cleanStack = this.sanitizeStackName(options.stackName);
+                const archiveName = options.archiveName || "stacks.pxar";
                 const tempExtractDir = path.join(os.tmpdir(), `dockge-restore-${Date.now()}`);
                 await fsAsync.mkdir(tempExtractDir, { recursive: true });
 
-                this.emitLog({
-                    type: "info",
-                    text: `[PBS Restore] Selective restore for stack "${cleanStack}" to temporary staging...\n`,
-                    timestamp: Date.now(),
-                });
+                this.logProgress("info", `[PBS Restore] Selective restore for stack "${cleanStack}" from ${archiveName}...\n`);
 
                 try {
-                    await client.restore(options.snapshot, archiveName, tempExtractDir, (event) => {
-                        this.emitLog(event);
-                    });
+                    await client.restore(options.snapshot, archiveName, tempExtractDir, (event) => this.emitLog(event));
 
-                    // Target stack directory
-                    const sourceStackPath = path.join(tempExtractDir, cleanStack);
+                    // Determine whether the archive was a full `stacks.pxar` (containing `<cleanStack>/`)
+                    // or a dedicated single-stack `<cleanStack>.pxar` (containing compose.yaml at root)
+                    const nestedStackPath = path.join(tempExtractDir, cleanStack);
+                    const sourceStackPath =
+                        fs.existsSync(nestedStackPath) && fs.statSync(nestedStackPath).isDirectory()
+                            ? nestedStackPath
+                            : archiveName.startsWith(`${cleanStack}.pxar`)
+                                ? tempExtractDir
+                                : nestedStackPath;
+
                     const destStackPath = path.join(stacksDir, cleanStack);
 
                     if (!fs.existsSync(sourceStackPath)) {
                         throw new Error(`Stack "${cleanStack}" was not found inside snapshot archive ${archiveName}.`);
                     }
 
-                    // Optional pre-restore backup
                     if (options.createPreRestoreBackup && fs.existsSync(destStackPath)) {
                         const backupCopyPath = path.join(stacksDir, `${cleanStack}.bak-${Date.now()}`);
                         await fsAsync.cp(destStackPath, backupCopyPath, { recursive: true });
-                        this.emitLog({
-                            type: "info",
-                            text: `[PBS Restore] Created pre-restore backup: ${backupCopyPath}\n`,
-                            timestamp: Date.now(),
-                        });
+                        this.logProgress("info", `[PBS Restore] Created pre-restore backup: ${backupCopyPath}\n`);
                     }
 
-                    // Copy extracted stack to destination
                     await fsAsync.cp(sourceStackPath, destStackPath, { recursive: true });
-
-                    this.emitLog({
-                        type: "info",
-                        text: `[PBS Restore] Successfully restored stack files to ${destStackPath}\n`,
-                        timestamp: Date.now(),
-                    });
-
-                    // Start container if requested
-                    if (options.startAfterRestore) {
-                        this.emitLog({
-                            type: "info",
-                            text: `[PBS Restore] Starting stack "${cleanStack}" (docker compose up -d)...\n`,
-                            timestamp: Date.now(),
-                        });
-                        await this.runCompose(destStackPath, "up", "-d");
-                    }
+                    restoredStackDirs.push(destStackPath);
+                    this.logProgress("info", `[PBS Restore] Successfully restored stack files to ${destStackPath}\n`);
 
                 } finally {
-                    // Clean up temp extraction folder
-                    await fsAsync.rm(tempExtractDir, { recursive: true, force: true }).catch(() => {});
+                    await fsAsync.rm(tempExtractDir, { recursive: true,
+                        force: true }).catch(() => {});
                 }
 
             } else {
                 // FULL RESTORE: Extract directly into stacksDir
-                this.emitLog({
-                    type: "info",
-                    text: `[PBS Restore] Full restore into ${stacksDir}...\n`,
-                    timestamp: Date.now(),
-                });
+                const archiveName = options.archiveName || "stacks.pxar";
+                this.logProgress("info", `[PBS Restore] Full restore of ${archiveName} into ${stacksDir}...\n`);
 
-                await client.restore(options.snapshot, archiveName, stacksDir, (event) => {
-                    this.emitLog(event);
-                });
+                await client.restore(options.snapshot, archiveName, stacksDir, (event) => this.emitLog(event));
+
+                if (fs.existsSync(stacksDir)) {
+                    const entries = await fsAsync.readdir(stacksDir, { withFileTypes: true });
+                    for (const entry of entries) {
+                        if (entry.isDirectory() && !entry.name.includes(".bak-")) {
+                            restoredStackDirs.push(path.join(stacksDir, entry.name));
+                        }
+                    }
+                }
             }
 
-            // Refresh Dockge UI stacks list if server is attached
+            // Step 2: Restore external bind mounts and named Docker volumes from `.pbs-manifest.json`
+            if (restoreVolumes) {
+                const containerMounts = inspector.getActiveContainerMounts();
+
+                for (const stackDir of restoredStackDirs) {
+                    const manifest = await inspector.readStackManifest(stackDir);
+                    if (!manifest) {
+                        continue;
+                    }
+
+                    // Inform the user of any external: true networks or volumes required before starting the stack
+                    const preStartCmds = [
+                        ...(manifest.externalNetworks || []).map((n) => `docker network create ${n}`),
+                        ...(manifest.externalVolumes || []).map((v) => `docker volume create ${v}`),
+                    ];
+                    if (preStartCmds.length > 0) {
+                        this.logProgress(
+                            "info",
+                            `[PBS Restore Note] Stack "${manifest.stackName}" uses external resources. Before starting the stack on a new host, run:\n  ${preStartCmds.join("\n  ")}\n`
+                        );
+                    }
+
+                    for (const ext of manifest.externalArchives) {
+                        let targetHostPath = ext.hostPath;
+
+                        if (ext.kind === "named-volume" && ext.dockerVolumeName) {
+                            if (ext.isExternalResource) {
+                                this.logProgress(
+                                    "info",
+                                    `[PBS Restore Note] Volume "${ext.dockerVolumeName}" is external: true. Ensure it exists (docker volume create ${ext.dockerVolumeName}) before starting.\n`
+                                );
+                                targetHostPath = await inspector.resolveNamedVolumeHostPath(ext.dockerVolumeName);
+                            } else {
+                                this.logProgress(
+                                    "info",
+                                    `[PBS Restore] Ensuring Docker volume "${ext.dockerVolumeName}" is registered...\n`
+                                );
+                                targetHostPath = await inspector.ensureDockerVolumeCreated(ext.dockerVolumeName);
+                            }
+                        }
+
+                        if (!inspector.isHostPathMountedInDockge(targetHostPath, stackDir, containerMounts)) {
+                            this.logProgress(
+                                "error",
+                                `[PBS Restore Warning] Skipping volume "${ext.source}" because ${targetHostPath} is not mounted into Dockge.\n`
+                            );
+                            continue;
+                        }
+
+                        if (options.createPreRestoreBackup && fs.existsSync(targetHostPath)) {
+                            const backupVolPath = `${targetHostPath}.bak-${Date.now()}`;
+                            await fsAsync.cp(targetHostPath, backupVolPath, { recursive: true }).catch(() => {});
+                        }
+
+                        await fsAsync.mkdir(targetHostPath, { recursive: true });
+                        this.logProgress(
+                            "info",
+                            `[PBS Restore] Restoring ${ext.kind} "${ext.source}" (${ext.archiveName}) -> ${targetHostPath}...\n`
+                        );
+
+                        await client.restore(options.snapshot, ext.archiveName, targetHostPath, (event) =>
+                            this.emitLog(event)
+                        );
+                    }
+                }
+            }
+
+            // Step 3: Start containers if requested (after both stack files AND volumes are restored)
+            if (options.startAfterRestore) {
+                for (const stackDir of restoredStackDirs) {
+                    this.logProgress("info", `[PBS Restore] Starting stack at ${stackDir} (docker compose up -d)...\n`);
+                    await this.runCompose(stackDir, "up", "-d");
+                }
+            }
+
             if (this.server) {
                 this.server.sendStackList();
             }
 
             const successMsg = `Restore from ${options.snapshot} finished successfully.`;
-            this.emitLog({
-                type: "done",
-                text: `[PBS Restore] ${successMsg}\n`,
-                timestamp: Date.now(),
-            });
-
-            return { ok: true, message: successMsg };
+            this.logProgress("done", `[PBS Restore] ${successMsg}\n`);
+            return { ok: true,
+                message: successMsg };
 
         } catch (error) {
             const errorMsg = error instanceof Error ? error.message : String(error);
-            this.emitLog({
-                type: "error",
-                text: `[PBS Restore Error] ${errorMsg}\n`,
-                timestamp: Date.now(),
-            });
+            this.logProgress("error", `[PBS Restore Error] ${errorMsg}\n`);
             throw error;
         } finally {
             this.releaseLock();
@@ -473,14 +727,46 @@ export class PbsManager {
     }
 
     /**
+     * Lists snapshots on PBS that contain backups for a specific stack
+     * (either via a per-stack backup-id `<baseBackupId>-<stackName>`, a `<stackName>.pxar` archive,
+     * or a legacy `stacks.pxar` archive).
+     */
+    public async listStackSnapshots(stackName: string): Promise<PbsSnapshot[]> {
+        const cleanStack = this.sanitizeStackName(stackName);
+        const config = await this.getConfig();
+        const baseBackupId = config.backupId || os.hostname() || "dockge";
+        const expectedStackBackupId = this.buildStackBackupId(baseBackupId, cleanStack);
+        const allSnapshots = await this.listSnapshots();
+
+        return allSnapshots.filter((snap) => {
+            if (snap["backup-id"] === expectedStackBackupId) {
+                return true;
+            }
+            if (!Array.isArray(snap.files) || snap.files.length === 0) {
+                return false;
+            }
+            return snap.files.some(
+                (f) =>
+                    f.filename === "stacks.pxar" ||
+                    f.filename === "stacks.pxar.didx" ||
+                    f.filename === "stacks.mpxar.didx" ||
+                    f.filename === `${cleanStack}.pxar` ||
+                    f.filename === `${cleanStack}.pxar.didx` ||
+                    f.filename === `${cleanStack}.mpxar.didx` ||
+                    f.filename === `${cleanStack}.ppxar.didx`
+            );
+        });
+    }
+
+    /**
      * Deletes a specific snapshot on PBS.
      */
     public async deleteSnapshot(snapshot: string): Promise<{ ok: boolean; message: string }> {
         const client = await this.getClient();
         await client.forget(snapshot);
-        return { ok: true, message: `Snapshot ${snapshot} deleted.` };
+        return { ok: true,
+            message: `Snapshot ${snapshot} deleted.` };
     }
 }
 
 export const pbsManager = PbsManager.getInstance();
-
