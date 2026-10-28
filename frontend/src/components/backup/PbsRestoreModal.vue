@@ -99,7 +99,7 @@
                     </div>
 
                     <!-- Confirmation Checkbox -->
-                    <div class="form-check p-3 bg-light rounded border">
+                    <div class="form-check p-3 border border-danger-subtle confirm-box">
                         <input
                             id="confirmRestore"
                             v-model="confirmed"
@@ -202,6 +202,9 @@ export default {
 .modal-content {
     border-radius: 12px;
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+}
+.confirm-box {
+    border-radius: 10px;
 }
 </style>
 

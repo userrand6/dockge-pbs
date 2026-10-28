@@ -106,6 +106,20 @@ export interface RestoreOptions {
 }
 
 /**
+ * Per-stack backup configuration.
+ */
+export interface StackBackupConfig {
+    /** Whether automated backup is specifically enabled for this stack */
+    enabled: boolean;
+    /** Container handling mode for this stack during backup (e.g. "none" / live, "pause", "stop") */
+    containerMode: ContainerBackupMode;
+    /** Optional custom cron schedule for this stack (if empty, uses global schedule) */
+    cron?: string;
+    /** Whether to include local bind mounts and data folders inside the stack directory */
+    includeVolumes?: boolean;
+}
+
+/**
  * Schedule and retention configuration.
  */
 export interface PbsScheduleConfig {

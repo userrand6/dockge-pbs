@@ -255,6 +255,63 @@ export class PbsSocketHandler extends SocketHandler {
                 callbackError(e, callback);
             }
         });
+
+        // 11. Get Stack Backup Configuration
+        socket.on("getStackBackupConfig", async (stackName: unknown, callback: unknown) => {
+            try {
+                checkLogin(socket);
+                if (typeof stackName !== "string" || !stackName.trim()) {
+                    throw new Error("Invalid stack name.");
+                }
+
+                const config = await pbsManager.getStackConfig(stackName.trim());
+                callbackResult({
+                    ok: true,
+                    data: config,
+                }, callback);
+            } catch (e) {
+                callbackError(e, callback);
+            }
+        });
+
+        // 12. Save Stack Backup Configuration
+        socket.on("saveStackBackupConfig", async (stackName: unknown, configInput: unknown, callback: unknown) => {
+            try {
+                checkLogin(socket);
+                if (typeof stackName !== "string" || !stackName.trim()) {
+                    throw new Error("Invalid stack name.");
+                }
+                if (!configInput || typeof configInput !== "object") {
+                    throw new Error("Configuration must be an object.");
+                }
+
+                await pbsManager.saveStackConfig(stackName.trim(), configInput as any);
+                callbackResult({
+                    ok: true,
+                    msg: "Stack backup configuration saved.",
+                }, callback);
+            } catch (e) {
+                callbackError(e, callback);
+            }
+        });
+
+        // 13. Get Snapshots for a specific stack
+        socket.on("getStackSnapshots", async (stackName: unknown, callback: unknown) => {
+            try {
+                checkLogin(socket);
+                if (typeof stackName !== "string" || !stackName.trim()) {
+                    throw new Error("Invalid stack name.");
+                }
+
+                const snapshots = await pbsManager.listStackSnapshots(stackName.trim());
+                callbackResult({
+                    ok: true,
+                    data: snapshots,
+                }, callback);
+            } catch (e) {
+                callbackError(e, callback);
+            }
+        });
     }
 }
 

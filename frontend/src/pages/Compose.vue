@@ -21,32 +21,42 @@
                         {{ $t("saveStackDraft") }}
                     </button>
 
-                    <button v-if="!isEditMode" class="btn btn-secondary" :disabled="processing" @click="enableEditMode">
+                    <button v-if="!isEditMode && !isBackupMode" class="btn btn-secondary" :disabled="processing" @click="enableEditMode">
                         <font-awesome-icon icon="pen" class="me-1" />
                         {{ $t("editStack") }}
                     </button>
 
-                    <button v-if="!isEditMode && !active" class="btn btn-primary" :disabled="processing" @click="startStack">
+                    <button v-if="!isEditMode && !isBackupMode && !isAdd" class="btn btn-normal" :disabled="processing" @click="enableBackupMode">
+                        <font-awesome-icon icon="cloud-arrow-down" class="me-1" />
+                        {{ $t("Backup") }}
+                    </button>
+
+                    <button v-if="isBackupMode" class="btn btn-secondary" :disabled="processing" @click="disableBackupMode">
+                        <font-awesome-icon icon="undo" class="me-1" />
+                        {{ $t("Back") }}
+                    </button>
+
+                    <button v-if="!isEditMode && !isBackupMode && !active" class="btn btn-primary" :disabled="processing" @click="startStack">
                         <font-awesome-icon icon="play" class="me-1" />
                         {{ $t("startStack") }}
                     </button>
 
-                    <button v-if="!isEditMode && active" class="btn btn-normal " :disabled="processing" @click="restartStack">
+                    <button v-if="!isEditMode && !isBackupMode && active" class="btn btn-normal " :disabled="processing" @click="restartStack">
                         <font-awesome-icon icon="rotate" class="me-1" />
                         {{ $t("restartStack") }}
                     </button>
 
-                    <button v-if="!isEditMode" class="btn btn-normal" :disabled="processing" @click="updateStack">
+                    <button v-if="!isEditMode && !isBackupMode" class="btn btn-normal" :disabled="processing" @click="updateStack">
                         <font-awesome-icon icon="cloud-arrow-down" class="me-1" />
                         {{ $t("updateStack") }}
                     </button>
 
-                    <button v-if="!isEditMode && active" class="btn btn-normal" :disabled="processing" @click="stopStack">
+                    <button v-if="!isEditMode && !isBackupMode && active" class="btn btn-normal" :disabled="processing" @click="stopStack">
                         <font-awesome-icon icon="stop" class="me-1" />
                         {{ $t("stopStack") }}
                     </button>
 
-                    <BDropdown right text="" variant="normal">
+                    <BDropdown v-if="!isBackupMode" right text="" variant="normal">
                         <BDropdownItem @click="downStack">
                             <font-awesome-icon icon="stop" class="me-1" />
                             {{ $t("downStack") }}
@@ -55,7 +65,7 @@
                 </div>
 
                 <button v-if="isEditMode && !isAdd" class="btn btn-normal" :disabled="processing" @click="discardStack">{{ $t("discardStack") }}</button>
-                <button v-if="!isEditMode" class="btn btn-danger" :disabled="processing" @click="showDeleteDialog = !showDeleteDialog">
+                <button v-if="!isEditMode && !isBackupMode" class="btn btn-danger" :disabled="processing" @click="showDeleteDialog = !showDeleteDialog">
                     <font-awesome-icon icon="trash" class="me-1" />
                     {{ $t("deleteStack") }}
                 </button>
@@ -81,7 +91,16 @@
                 ></Terminal>
             </transition>
 
-            <div v-if="stack.isManagedByDockge" class="row">
+            <!-- Stack Backup View -->
+            <StackBackup
+                v-if="isBackupMode"
+                :stack-name="stack.name"
+                :endpoint="endpoint"
+                :services="Object.keys(jsonConfig.services || {})"
+                @close="disableBackupMode"
+            />
+
+            <div v-else-if="stack.isManagedByDockge" class="row">
                 <div class="col-lg-6">
                     <!-- General -->
                     <div v-if="isAdd">
@@ -339,6 +358,7 @@ export default {
             serviceStatusList: {},
             dockerStats: {},
             isEditMode: false,
+            isBackupMode: false,
             submitted: false,
             showDeleteDialog: false,
             newContainerName: "",
@@ -589,6 +609,7 @@ export default {
 
         loadStack() {
             this.processing = true;
+            this.isBackupMode = false;
             this.$root.emitAgent(this.endpoint, "getStack", this.stack.name, (res) => {
                 if (res.ok) {
                     this.stack = res.stack;
@@ -770,6 +791,16 @@ export default {
 
         enableEditMode() {
             this.isEditMode = true;
+            this.isBackupMode = false;
+        },
+
+        enableBackupMode() {
+            this.isBackupMode = true;
+            this.isEditMode = false;
+        },
+
+        disableBackupMode() {
+            this.isBackupMode = false;
         },
 
         checkYAML() {

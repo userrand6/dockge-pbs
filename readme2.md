@@ -210,19 +210,41 @@ docker compose up -d
 
 ---
 
-## 6. Verifying the PBS Integration in the UI
+---
 
+## 6. Configuring PBS via `.env` (Optional)
+
+You can pre-configure all Proxmox Backup Server settings directly in your `.env` file without needing to input them in the UI:
+
+```env
+# Proxmox Backup Server Configuration
+PBS_ENABLED=true
+PBS_HOST=192.168.1.100
+PBS_PORT=8007
+PBS_DATASTORE=backup-ds
+PBS_AUTH_ID=dockge@pbs!backup-token
+PBS_SECRET=your-api-token-secret
+PBS_FINGERPRINT=aa:bb:cc:dd:...:zz
+PBS_BACKUP_ID=dockge-host
+# PBS_NAMESPACE=dockge-nodes
+# PBS_ENCRYPTION_PASSWORD=my-client-encryption-pass
+```
+
+---
+
+## 7. Verifying the PBS Integration in the UI
+
+### 7.1 Global Settings & Management
 1. Open Dockge in your browser (`http://localhost:5001`).
 2. Log in and navigate to **Settings** (`/settings`) from the top-right menu.
 3. Click on **Backup** in the left sidebar menu.
 4. **Configure PBS Connection**:
    - Under the **PBS Connection** tab:
-     - Check **Enable Proxmox Backup Server Integration**.
-     - Enter your PBS **Host / IP** (e.g. `192.168.1.100`), **Port** (default `8007`), and **Datastore** (e.g. `backup-ds`).
-     - Enter your **Auth ID** (e.g. `backup-user@pbs!dockge-token` or `root@pam`).
-     - Enter your **Password / Secret**.
-     - If using a self-signed certificate on PBS, paste the SHA-256 certificate fingerprint.
-   - Click **Test Connection** to verify server reachability.
+     - Check **Enable Proxmox Backup Server Integration** (or set in `.env`).
+     - Enter your PBS **Host / IP**, **Port**, and **Datastore**.
+     - Enter your **Auth ID** and **Password / Secret**.
+     - If using a self-signed certificate, paste your SHA-256 certificate fingerprint.
+   - Click **Test Connection** to verify reachability.
    - Click **Save PBS Configuration**.
 5. **Run a Manual Backup**:
    - Click **Backup Now** at the top right of the Backup screen.
@@ -233,6 +255,17 @@ docker compose up -d
    - Click **Restore...** on any snapshot.
    - Choose between **Single Stack** (recommended) or **Full Restore**.
    - Check the safety confirmation and click **Start Restore**.
+
+### 7.2 Per-Stack / Per-Container Backup & Restore View
+When viewing any individual stack:
+1. Click the **Backup** button located directly next to the **Edit** button in the top action bar.
+2. The page transforms into the **Stack Backup** view:
+   - **Containers in this Stack**: Lists all containers/services managed within this stack.
+   - **Container State During Backup**: Choose between **Live** (no downtime), **Pause** (`docker compose pause`), or **Stop / Restart** (`docker compose stop` during archive, restart after).
+   - **Automated Schedule**: Set a dedicated schedule for this stack (Daily, Weekly, Custom Cron, or Inherit Global Schedule).
+   - **Snapshots for this Stack**: Browse all PBS snapshots containing this stack and click **Restore** to selectively restore only this stack.
+   - **Backup Stack Now**: Trigger an instant, isolated backup of this specific stack with live progress output.
+3. Click **Back** to return to the normal Compose view.
    - The live console will track the extraction and report completion.
 8. **Configure Automated Schedule**:
    - Under the **Schedule & Retention** tab:

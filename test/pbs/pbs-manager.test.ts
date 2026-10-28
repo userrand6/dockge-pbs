@@ -149,5 +149,32 @@ describe("PbsManager", () => {
         const backupCopy = entries.find((e) => e.startsWith("nginx-app.bak-"));
         assert.ok(backupCopy, "Pre-restore safety backup directory must exist");
     });
+
+    it("should allow setting PBS host and fingerprint via environment variables", async () => {
+        const originalEnv = { ...process.env };
+        try {
+            // Clear DB config
+            await manager.saveConfig({} as any);
+
+            process.env.PBS_HOST = "env-pbs.local";
+            process.env.PBS_PORT = "8008";
+            process.env.PBS_DATASTORE = "env-ds";
+            process.env.PBS_AUTH_ID = "env-user@pbs";
+            process.env.PBS_SECRET = "env-secret";
+            process.env.PBS_FINGERPRINT = "aa:bb:cc:dd:ee:ff";
+            process.env.PBS_ENABLED = "true";
+
+            const config = await manager.getConfig();
+            assert.equal(config.enabled, true);
+            assert.equal(config.host, "env-pbs.local");
+            assert.equal(config.port, 8008);
+            assert.equal(config.datastore, "env-ds");
+            assert.equal(config.authId, "env-user@pbs");
+            assert.equal(config.secret, "env-secret");
+            assert.equal(config.fingerprint, "aa:bb:cc:dd:ee:ff");
+        } finally {
+            process.env = originalEnv;
+        }
+    });
 });
 

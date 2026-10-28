@@ -1,62 +1,60 @@
 <template>
     <div class="my-3">
-        <!-- Top Operational Status & Actions Card -->
-        <div class="card mb-4 border-0 shadow-sm">
-            <div class="card-body">
-                <div class="d-flex flex-wrap justify-content-between align-items-center gap-3">
-                    <div>
-                        <h4 class="mb-1 d-flex align-items-center">
-                            <font-awesome-icon icon="cloud-arrow-down" class="text-primary me-2" />
-                            {{ $t("Proxmox Backup Server (PBS)") }}
-                        </h4>
-                        <div class="text-secondary small">
-                            <span v-if="status.isOperating" class="badge bg-warning text-dark me-2">
-                                <font-awesome-icon icon="spinner" spin class="me-1" />
-                                {{ status.currentOperation.toUpperCase() }} {{ $t("in progress...") }}
-                            </span>
-                            <span v-else-if="pbsConfig.enabled" class="badge bg-success me-2">
-                                <font-awesome-icon icon="check-circle" class="me-1" /> {{ $t("Configured") }}
-                            </span>
-                            <span v-else class="badge bg-secondary me-2">
-                                {{ $t("Disabled / Not Configured") }}
-                            </span>
+        <!-- Top Operational Status & Actions -->
+        <div class="mb-4">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-3">
+                <div>
+                    <h4 class="mb-1 d-flex align-items-center">
+                        <font-awesome-icon icon="cloud-arrow-down" class="text-primary me-2" />
+                        {{ $t("Proxmox Backup Server (PBS)") }}
+                    </h4>
+                    <div class="text-secondary small">
+                        <span v-if="status.isOperating" class="badge bg-warning text-dark me-2">
+                            <font-awesome-icon icon="spinner" spin class="me-1" />
+                            {{ status.currentOperation.toUpperCase() }} {{ $t("in progress...") }}
+                        </span>
+                        <span v-else-if="pbsConfig.enabled" class="badge bg-success me-2">
+                            <font-awesome-icon icon="check-circle" class="me-1" /> {{ $t("Configured") }}
+                        </span>
+                        <span v-else class="badge bg-secondary me-2">
+                            {{ $t("Disabled / Not Configured") }}
+                        </span>
 
-                            <span v-if="status.lastBackup" class="me-3">
-                                <strong>{{ $t("Last Backup") }}:</strong>
-                                <span :class="status.lastBackup.status === 'success' ? 'text-success' : 'text-danger'">
-                                    {{ formatDate(status.lastBackup.timestamp) }} ({{ status.lastBackup.status }})
-                                </span>
+                        <span v-if="status.lastBackup" class="me-3">
+                            <strong>{{ $t("Last Backup") }}:</strong>
+                            <span :class="status.lastBackup.status === 'success' ? 'text-success' : 'text-danger'">
+                                {{ formatDate(status.lastBackup.timestamp) }} ({{ status.lastBackup.status }})
                             </span>
+                        </span>
 
-                            <span v-if="scheduleConfig.enabled && status.nextScheduledRun">
-                                <strong>{{ $t("Next Run") }}:</strong>
-                                <span class="text-primary">{{ formatDate(status.nextScheduledRun) }}</span>
-                            </span>
-                        </div>
+                        <span v-if="scheduleConfig.enabled && status.nextScheduledRun">
+                            <strong>{{ $t("Next Run") }}:</strong>
+                            <span class="text-primary">{{ formatDate(status.nextScheduledRun) }}</span>
+                        </span>
                     </div>
+                </div>
 
-                    <div class="d-flex gap-2">
-                        <button
-                            class="btn btn-outline-secondary"
-                            type="button"
-                            @click="showConsole = true"
-                        >
-                            <font-awesome-icon icon="terminal" class="me-1" />
-                            {{ $t("Console") }}
-                            <span v-if="logs.length > 0" class="badge bg-secondary ms-1">{{ logs.length }}</span>
-                        </button>
+                <div class="d-flex gap-2">
+                    <button
+                        class="btn btn-outline-secondary"
+                        type="button"
+                        @click="showConsole = true"
+                    >
+                        <font-awesome-icon icon="terminal" class="me-1" />
+                        {{ $t("Console") }}
+                        <span v-if="logs.length > 0" class="badge bg-secondary ms-1">{{ logs.length }}</span>
+                    </button>
 
-                        <button
-                            class="btn btn-primary"
-                            type="button"
-                            :disabled="status.isOperating || !pbsConfig.enabled || !pbsConfig.host"
-                            @click="triggerManualBackup"
-                        >
-                            <font-awesome-icon v-if="status.isOperating" icon="spinner" spin class="me-1" />
-                            <font-awesome-icon v-else icon="play" class="me-1" />
-                            {{ $t("Backup Now") }}
-                        </button>
-                    </div>
+                    <button
+                        class="btn btn-primary"
+                        type="button"
+                        :disabled="status.isOperating || !pbsConfig.enabled || !pbsConfig.host"
+                        @click="triggerManualBackup"
+                    >
+                        <font-awesome-icon v-if="status.isOperating" icon="spinner" spin class="me-1" />
+                        <font-awesome-icon v-else icon="play" class="me-1" />
+                        {{ $t("Backup Now") }}
+                    </button>
                 </div>
             </div>
         </div>
@@ -122,16 +120,16 @@
                 </button>
             </div>
 
-            <div v-if="filteredSnapshots.length === 0" class="alert alert-light text-center py-5 border">
-                <font-awesome-icon icon="info-circle" class="text-secondary fa-2x mb-2" />
-                <div class="text-secondary">
+            <div v-if="filteredSnapshots.length === 0" class="text-center py-5 text-secondary">
+                <font-awesome-icon icon="info-circle" class="fa-2x mb-2" />
+                <div>
                     {{ pbsConfig.enabled ? $t("No snapshots found on Proxmox Backup Server.") : $t("Configure and enable PBS connection to view snapshots.") }}
                 </div>
             </div>
 
-            <div v-else class="table-responsive shadow-sm rounded">
+            <div v-else class="table-responsive">
                 <table class="table table-hover align-middle mb-0">
-                    <thead class="table-light">
+                    <thead>
                         <tr>
                             <th>{{ $t("Date & Time") }}</th>
                             <th>{{ $t("Snapshot ID") }}</th>
@@ -183,7 +181,7 @@
 
         <!-- TAB 2: PBS CONFIGURATION -->
         <div v-if="activeTab === 'config'">
-            <form class="card p-4 border-0 shadow-sm" @submit.prevent="savePbsConfig">
+            <form class="my-3" @submit.prevent="savePbsConfig">
                 <!-- Enabled Toggle -->
                 <div class="form-check form-switch mb-4">
                     <input
@@ -339,7 +337,7 @@
 
         <!-- TAB 3: SCHEDULE & RETENTION -->
         <div v-if="activeTab === 'schedule'">
-            <form class="card p-4 border-0 shadow-sm" @submit.prevent="saveSchedule">
+            <form class="my-3" @submit.prevent="saveSchedule">
                 <!-- Enable Schedule Switch -->
                 <div class="form-check form-switch mb-4">
                     <input
@@ -356,37 +354,31 @@
                 <!-- Schedule Frequency Presets -->
                 <div class="mb-4">
                     <label class="form-label fw-bold">{{ $t("Backup Frequency") }}</label>
-                    <div class="row g-2">
-                        <div class="col-md-4">
-                            <div
-                                class="border rounded p-3 text-center cursor-pointer"
-                                :class="{ 'border-primary bg-light': schedulePreset === 'daily' }"
-                                @click="selectPreset('daily')"
-                            >
-                                <div class="fw-bold">{{ $t("Daily") }}</div>
-                                <div class="small text-secondary">{{ $t("Every day at 2:00 AM") }}</div>
-                            </div>
-                        </div>
-                        <div class="col-md-4">
-                            <div
-                                class="border rounded p-3 text-center cursor-pointer"
-                                :class="{ 'border-primary bg-light': schedulePreset === 'weekly' }"
-                                @click="selectPreset('weekly')"
-                            >
-                                <div class="fw-bold">{{ $t("Weekly") }}</div>
-                                <div class="small text-secondary">{{ $t("Every Sunday at 2:00 AM") }}</div>
-                            </div>
-                        </div>
-                        <div class="col-md-4">
-                            <div
-                                class="border rounded p-3 text-center cursor-pointer"
-                                :class="{ 'border-primary bg-light': schedulePreset === 'custom' }"
-                                @click="selectPreset('custom')"
-                            >
-                                <div class="fw-bold">{{ $t("Custom Cron") }}</div>
-                                <div class="small text-secondary">{{ $t("Advanced cron expression") }}</div>
-                            </div>
-                        </div>
+                    <div class="d-flex flex-wrap gap-2">
+                        <button
+                            type="button"
+                            class="btn"
+                            :class="schedulePreset === 'daily' ? 'btn-primary' : 'btn-outline-secondary'"
+                            @click="selectPreset('daily')"
+                        >
+                            {{ $t("Daily (2:00 AM)") }}
+                        </button>
+                        <button
+                            type="button"
+                            class="btn"
+                            :class="schedulePreset === 'weekly' ? 'btn-primary' : 'btn-outline-secondary'"
+                            @click="selectPreset('weekly')"
+                        >
+                            {{ $t("Weekly (Sunday 2:00 AM)") }}
+                        </button>
+                        <button
+                            type="button"
+                            class="btn"
+                            :class="schedulePreset === 'custom' ? 'btn-primary' : 'btn-outline-secondary'"
+                            @click="selectPreset('custom')"
+                        >
+                            {{ $t("Custom Cron") }}
+                        </button>
                     </div>
                 </div>
 
@@ -754,13 +746,22 @@ export default {
 };
 </script>
 
-<style scoped>
-.cursor-pointer {
-    cursor: pointer;
-    transition: all 0.15s ease-in-out;
-}
-.cursor-pointer:hover {
-    background-color: rgba(0, 0, 0, 0.03);
+<style lang="scss" scoped>
+@import "../../styles/vars.scss";
+
+.table {
+    margin-bottom: 0;
+
+    .dark & {
+        color: $dark-font-color;
+        border-color: $dark-border-color;
+
+        th, td {
+            background-color: transparent;
+            color: $dark-font-color;
+            border-bottom-color: $dark-border-color;
+        }
+    }
 }
 </style>
 

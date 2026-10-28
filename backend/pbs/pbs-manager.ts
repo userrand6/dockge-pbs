@@ -69,21 +69,33 @@ export class PbsManager {
     }
 
     /**
-     * Retrieves PBS connection configuration from Dockge database.
+     * Retrieves PBS connection configuration from Dockge database,
+     * merging or falling back to environment variables (e.g. PBS_HOST, PBS_FINGERPRINT).
      */
     public async getConfig(): Promise<PbsConfig> {
         const raw = await Settings.get("pbs_config");
-        if (!raw || typeof raw !== "object") {
-            return {
-                enabled: false,
-                host: "",
-                port: 8007,
-                datastore: "",
-                authId: "",
-                secret: "",
-            };
-        }
-        return raw as PbsConfig;
+        const dbConfig: Partial<PbsConfig> = (raw && typeof raw === "object") ? raw : {};
+
+        const envEnabled = process.env.PBS_ENABLED !== undefined
+            ? (process.env.PBS_ENABLED === "true" || process.env.PBS_ENABLED === "1")
+            : undefined;
+
+        const envPort = process.env.PBS_PORT ? parseInt(process.env.PBS_PORT, 10) : undefined;
+
+        const config: PbsConfig = {
+            enabled: dbConfig.enabled ?? envEnabled ?? false,
+            host: dbConfig.host || process.env.PBS_HOST || "",
+            port: dbConfig.port || (envPort && !isNaN(envPort) ? envPort : 8007),
+            datastore: dbConfig.datastore || process.env.PBS_DATASTORE || "",
+            authId: dbConfig.authId || process.env.PBS_AUTH_ID || "",
+            secret: dbConfig.secret || process.env.PBS_SECRET || process.env.PBS_PASSWORD || "",
+            fingerprint: dbConfig.fingerprint || process.env.PBS_FINGERPRINT || undefined,
+            encryptionPassword: dbConfig.encryptionPassword || process.env.PBS_ENCRYPTION_PASSWORD || undefined,
+            namespace: dbConfig.namespace || process.env.PBS_NAMESPACE || undefined,
+            backupId: dbConfig.backupId || process.env.PBS_BACKUP_ID || undefined,
+        };
+
+        return config;
     }
 
     /**

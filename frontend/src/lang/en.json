@@ -154,5 +154,7 @@
     "PBS Connection": "PBS Connection",
     "Schedule & Retention": "Schedule & Retention",
     "Restore Snapshot": "Restore Snapshot",
-    "Backup Now": "Backup Now"
+    "Backup Now": "Backup Now",
+    "Stack Backup Configuration": "Stack Backup Configuration",
+    "Backup Stack Now": "Backup Stack Now"
 }

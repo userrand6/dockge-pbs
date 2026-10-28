@@ -29,8 +29,9 @@ This feature adds native Proxmox Backup Server (PBS) integration to Dockge, prov
 | **`docker/Base.Dockerfile`** | +4 lines | Installed `proxmox-backup-client` from the official Proxmox Debian Bookworm repository. |
 | **`frontend/src/router.ts`** | +5 lines | Registered the `/settings/backup` sub-route under Settings. |
 | **`frontend/src/pages/Settings.vue`** | +3 lines | Added the "Backup" item to the settings side navigation menu. |
-| **`frontend/src/lang/en.json`** | +7 lines | Added English localization strings for Backup UI labels. |
-| **`frontend/components.d.ts`** | Auto | Auto-registered `Backup`, `PbsRestoreModal`, and `PbsConsoleModal` components. |
+| **`frontend/src/pages/Compose.vue`** | +15 lines | Added "Backup" button next to "Edit" that toggles the stack-level backup and restore view. |
+| **`frontend/src/lang/en.json`** | +9 lines | Added English localization strings for Backup UI labels. |
+| **`frontend/components.d.ts`** | Auto | Auto-registered `Backup`, `StackBackup`, `PbsRestoreModal`, and `PbsConsoleModal`. |
 | **`package.json`** | +1 line | Added `"test:pbs": "tsx --test test/pbs/*.test.ts"`. |
 
 ### 2.2 Newly Added Files (100% Isolated)
@@ -50,6 +51,7 @@ frontend/src/
 │   ├── settings/
 │   │   └── Backup.vue                # Main Settings tab (Status, Snapshots, Config, Schedule)
 │   └── backup/
+│       ├── StackBackup.vue           # Per-stack / Per-container Backup & Restore view
 │       ├── PbsRestoreModal.vue       # Interactive Restore Wizard (Full vs Selective Stack)
 │       └── PbsConsoleModal.vue       # Real-time log streaming terminal window
 
