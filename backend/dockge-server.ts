@@ -36,6 +36,8 @@ import { AgentProxySocketHandler } from "./socket-handlers/agent-proxy-socket-ha
 import { AgentSocketHandler } from "./agent-socket-handler";
 import { AgentSocket } from "../common/agent-socket";
 import { ManageAgentSocketHandler } from "./socket-handlers/manage-agent-socket-handler";
+import { PbsSocketHandler } from "./socket-handlers/pbs-socket-handler";
+import { pbsScheduler } from "./pbs/pbs-scheduler";
 import { Terminal } from "./terminal";
 
 export class DockgeServer {
@@ -59,6 +61,7 @@ export class DockgeServer {
     socketHandlerList : SocketHandler[] = [
         new MainSocketHandler(),
         new ManageAgentSocketHandler(),
+        new PbsSocketHandler(),
     ];
 
     agentProxySocketHandler = new AgentProxySocketHandler();
@@ -101,7 +104,7 @@ export class DockgeServer {
 
         // Default stacks directory
         let defaultStacksDir;
-        if (process.platform === "win32") {
+        if (process.platform === "win32" || process.platform === "darwin") {
             defaultStacksDir = "./stacks";
         } else {
             defaultStacksDir = "/opt/stacks";
@@ -404,6 +407,7 @@ export class DockgeServer {
             });
 
             checkVersion.startInterval();
+            pbsScheduler.init(this);
         });
 
         gracefulShutdown(this.httpServer, {

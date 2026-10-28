@@ -42,6 +42,7 @@ export class Settings {
                 }
 
             }, 60 * 1000);
+            Settings.cacheCleaner.unref?.();
         }
 
         // Query from cache

@@ -16,5 +16,9 @@ RUN apt update && apt install --yes --no-install-recommends \
     && apt --yes --no-install-recommends install \
          docker-ce-cli \
          docker-compose-plugin \
+    && curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg -o /etc/apt/keyrings/proxmox-release-bookworm.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/proxmox-release-bookworm.gpg] http://download.proxmox.com/debian/pbs-client bookworm main" > /etc/apt/sources.list.d/pbs-client.list \
+    && apt update \
+    && apt --yes --no-install-recommends install proxmox-backup-client \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g tsx
