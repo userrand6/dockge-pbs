@@ -71,7 +71,110 @@ docker run --rm -v "$(pwd):/app" -w /app node:22-bookworm-slim \
 
 ---
 
-## 2. Quick Start: Automated Tests
+## 2. Linux Setup Guide (Debian / Ubuntu — Step-by-Step)
+
+On a Linux server or Proxmox VM/LXC (`amd64`), you can either run Dockge inside Docker (recommended for production) or directly on the host for development.
+
+### Option A: Production Docker Setup on Linux (Recommended)
+
+1. **Install Docker & Docker Compose Plugin (if not already installed):**
+   ```bash
+   curl -fsSL https://get.docker.com | sh
+   ```
+
+2. **Clone the Repository & Build the Image:**
+   *(If you just want to build the Docker image without installing Node.js on the host, install Node 22 or run `./build-docker.sh` after installing Node 22 below):*
+   ```bash
+   git clone -b proofofconcept git@github.com:userrand6/dockge-pbs.git
+   cd dockge-pbs
+   cp .env.example .env
+   # Edit .env with your PBS_HOST, PBS_DATASTORE, PBS_AUTH_ID, PBS_SECRET, and PBS_FINGERPRINT
+   nano .env
+   ```
+
+3. **Build the Docker Image with the Incremental Build Script:**
+   ```bash
+   ./build-docker.sh
+   ```
+
+4. **Configure `compose.yaml` for Linux (with Named Volume Support):**
+   On Linux, mount `/opt/stacks:/opt/stacks` and `/var/lib/docker/volumes:/var/lib/docker/volumes:rslave` so Dockge can back up and restore both stack folders and Docker named volumes:
+   ```yaml
+   services:
+     dockge:
+       image: dockge-pbs:latest
+       restart: unless-stopped
+       ports:
+         - 5001:5001
+       volumes:
+         - /var/run/docker.sock:/var/run/docker.sock
+         - ./data:/app/data
+         - /opt/stacks:/opt/stacks
+         # Mount Docker named volumes root so Dockge can back up & restore named volumes:
+         - /var/lib/docker/volumes:/var/lib/docker/volumes:rslave
+       environment:
+         - DOCKGE_STACKS_DIR=/opt/stacks
+       env_file:
+         - path: ./.env
+           required: false
+   ```
+
+5. **Start Dockge:**
+   ```bash
+   sudo mkdir -p /opt/stacks
+   docker compose up -d
+   ```
+
+---
+
+### Option B: Bare-Metal / Development Setup on Linux (Debian 12 Bookworm / Debian 13 Trixie)
+
+1. **Install Build Essentials & System Dependencies:**
+   ```bash
+   sudo apt update && sudo apt install -y \
+     curl ca-certificates gnupg build-essential python3 git
+   ```
+
+2. **Install Node.js 22:**
+   ```bash
+   # Using fnm (Fast Node Manager):
+   curl -fsSL https://fnm.vercel.app/install | bash
+   source ~/.bashrc
+   fnm install 22
+   fnm use 22
+   node -v   # v22.x.x
+   ```
+
+3. **Install `proxmox-backup-client` (only needed if running outside Docker):**
+   - **For Debian 12 (Bookworm):**
+     ```bash
+     sudo install -m 0755 -d /etc/apt/keyrings
+     curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg \
+       | sudo tee /etc/apt/keyrings/proxmox-release-bookworm.gpg > /dev/null
+     echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/proxmox-release-bookworm.gpg] http://download.proxmox.com/debian/pbs-client bookworm main" \
+       | sudo tee /etc/apt/sources.list.d/pbs-client.list
+     sudo apt update && sudo apt install -y proxmox-backup-client
+     ```
+   - **For Debian 13 (Trixie):**
+     ```bash
+     sudo install -m 0755 -d /etc/apt/keyrings
+     curl -fsSL https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg \
+       | sudo tee /etc/apt/keyrings/proxmox-archive-keyring.gpg > /dev/null
+     echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/proxmox-archive-keyring.gpg] http://download.proxmox.com/debian/pbs-client trixie main" \
+       | sudo tee /etc/apt/sources.list.d/pbs-client.list
+     sudo apt update && sudo apt install -y proxmox-backup-client
+     ```
+
+4. **Install NPM Dependencies & Run Tests / Dev Server:**
+   ```bash
+   npm install
+   npm run test:pbs
+   npm run dev
+   ```
+
+---
+
+## 3. Quick Start: Automated Tests
 
 All critical PBS backup, restore, scheduling, locking, and security functions are covered by an automated test suite. **The test suite does not require a live PBS server or Docker daemon** as it uses an integrated mock process runner.
 
@@ -104,14 +207,14 @@ npx tsx --test test/pbs/*.test.ts
 
 ---
 
-## 3. Building the Application
+## 4. Building the Application
 
-### 3.1 Install Dependencies
+### 4.1 Install Dependencies
 ```bash
 npm ci
 ```
 
-### 3.2 Code Quality Checks
+### 4.2 Code Quality Checks
 Verify TypeScript types and linting:
 ```bash
 # Type check (TypeScript)
@@ -124,15 +227,15 @@ npm run lint
 npm run fmt
 ```
 
-### 3.3 Build the Frontend
-Compile Vite assets into `frontend/dist`:
+### 4.3 Build the Frontend
+Compile Vite assets into `frontend-dist`:
 ```bash
 npm run build:frontend
 ```
 
 ---
 
-## 4. Running in Development Mode
+## 5. Running in Development Mode
 
 You can run the backend and frontend concurrently with hot-reloading:
 
@@ -161,47 +264,37 @@ Once started:
 
 ---
 
-## 5. Building and Running with Docker
+## 6. Building and Running with Docker
 
-### 5.1 Build the Docker Images Locally
+### 6.1 Fast Incremental Build (`./build-docker.sh`)
 
-1. **Build the Base Image** (includes `docker-ce-cli`, `docker-compose-plugin`, and `proxmox-backup-client`):
+Use the included incremental build script (which automatically builds `louislam/dockge:build-healthcheck`, `louislam/dockge:base` with `proxmox-backup-client`, `frontend-dist`, and `dockge-pbs:latest`, caching unchanged stages so subsequent rebuilds take ~1–2 seconds):
+
+```bash
+./build-docker.sh
+```
+
+*(Or to force a full rebuild of all stages: `./build-docker.sh --full`)*
+
+### 6.2 Manual Step-by-Step Docker Build (Optional)
+
+1. **Build the Healthcheck Binary**:
    ```bash
-   docker build -t louislam/dockge:base -f docker/Base.Dockerfile .
+   docker build --platform linux/amd64 -t louislam/dockge:build-healthcheck -f docker/BuildHealthCheck.Dockerfile .
    ```
 
-2. **Build the Healthcheck Binary**:
+2. **Build the Base Image** (includes `docker-ce-cli`, `docker-compose-plugin`, and `proxmox-backup-client`):
    ```bash
-   docker build -t louislam/dockge:build-healthcheck -f docker/BuildHealthCheck.Dockerfile .
+   docker build --platform linux/amd64 -t louislam/dockge:base -f docker/Base.Dockerfile .
    ```
 
 3. **Build the Main Release Image**:
    ```bash
-   # Build frontend first
    npm run build:frontend
-
-   # Build final release image
-   docker build -t dockge-pbs:latest --target release -f docker/Dockerfile .
+   docker build --platform linux/amd64 -t dockge-pbs:latest -f docker/Dockerfile .
    ```
 
-### 5.2 Run with Docker Compose
-
-Create a `compose.yaml` to run your custom build:
-
-```yaml
-services:
-  dockge:
-    image: dockge-pbs:latest
-    restart: unless-stopped
-    ports:
-      - 5001:5001
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./data:/app/data
-      - /opt/stacks:/opt/stacks
-    environment:
-      - DOCKGE_STACKS_DIR=/opt/stacks
-```
+### 6.3 Run with Docker Compose
 
 Start the container:
 ```bash
@@ -210,11 +303,13 @@ docker compose up -d
 
 ---
 
----
+## 7. Configuring PBS via `.env` (Optional)
 
-## 6. Configuring PBS via `.env` (Optional)
+Copy `.env.example` to `.env` to pre-configure all Proxmox Backup Server settings without needing to enter them in the UI:
 
-You can pre-configure all Proxmox Backup Server settings directly in your `.env` file without needing to input them in the UI:
+```bash
+cp .env.example .env
+```
 
 ```env
 # Proxmox Backup Server Configuration
@@ -232,9 +327,9 @@ PBS_BACKUP_ID=dockge-host
 
 ---
 
-## 7. Verifying the PBS Integration in the UI
+## 8. Verifying the PBS Integration in the UI
 
-### 7.1 Global Settings & Management
+### 8.1 Global Settings & Management
 1. Open Dockge in your browser (`http://localhost:5001`).
 2. Log in and navigate to **Settings** (`/settings`) from the top-right menu.
 3. Click on **Backup** in the left sidebar menu.
@@ -256,7 +351,7 @@ PBS_BACKUP_ID=dockge-host
    - Choose between **Single Stack** (recommended) or **Full Restore**.
    - Check the safety confirmation and click **Start Restore**.
 
-### 7.2 Per-Stack / Per-Container Backup & Restore View
+### 8.2 Per-Stack / Per-Container Backup & Restore View
 When viewing any individual stack:
 1. Click the **Backup** button located directly next to the **Edit** button in the top action bar.
 2. The page transforms into the **Stack Backup** view:

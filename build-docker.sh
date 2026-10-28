@@ -27,6 +27,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Ensure Homebrew / local / fnm paths are included if present on host
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/share/fnm:$PATH"
+
 IMAGE_TAG="dockge-pbs:latest"
 HEALTHCHECK_IMAGE="louislam/dockge:build-healthcheck"
 BASE_IMAGE="louislam/dockge:base"
@@ -95,7 +98,13 @@ fi
 
 if [ "$NEEDS_FRONTEND" = true ]; then
     echo "==> [3/4] Frontend changes detected — building frontend-dist..."
-    npm run build:frontend
+    if command -v npm >/dev/null 2>&1; then
+        npm run build:frontend
+    else
+        echo "    (Host 'npm' not found — building frontend inside $BASE_IMAGE container...)"
+        docker run --rm --platform "$PLATFORM" -v "$(pwd):/app" -w /app "$BASE_IMAGE" \
+            sh -c "[ -d node_modules ] || npm ci; npm run build:frontend"
+    fi
 else
     echo "==> [3/4] Frontend unchanged since last build (skipping vite build)."
 fi
