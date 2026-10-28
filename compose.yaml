@@ -1,6 +1,8 @@
 services:
   dockge:
     image: dockge-pbs:latest
+    platform: linux/amd64
+    pull_policy: never
     restart: unless-stopped
     ports:
       - 5001:5001
@@ -10,13 +12,13 @@ services:
       - /opt/stacks:/opt/stacks
     environment:
       - DOCKGE_STACKS_DIR=/opt/stacks
-      - PBS_ENABLED=${PBS_ENABLED}
-      - PBS_HOST=${PBS_HOST}
-      - PBS_PORT=${PBS_PORT}
-      - PBS_DATASTORE=${PBS_DATASTORE}
-      - PBS_AUTH_ID=${PBS_AUTH_ID}
-      - PBS_SECRET=${PBS_SECRET}
-      - PBS_FINGERPRINT=${PBS_FINGERPRINT}
-      - PBS_NAMESPACE=${PBS_NAMESPACE}
-      - PBS_BACKUP_ID=${PBS_BACKUP_ID}
-      - PBS_ENCRYPTION_PASSWORD=${PBS_ENCRYPTION_PASSWORD}
+      - PBS_ENABLED=${PBS_ENABLED:-false}
+      - PBS_HOST=${PBS_HOST:-}
+      - PBS_PORT=${PBS_PORT:-8007}
+      - PBS_DATASTORE=${PBS_DATASTORE:-}
+      - PBS_AUTH_ID=${PBS_AUTH_ID:-}
+      - PBS_SECRET=${PBS_SECRET:-}
+      - PBS_FINGERPRINT=${PBS_FINGERPRINT:-}
+      - PBS_NAMESPACE=${PBS_NAMESPACE:-}
+      - PBS_BACKUP_ID=${PBS_BACKUP_ID:-}
+      - PBS_ENCRYPTION_PASSWORD=${PBS_ENCRYPTION_PASSWORD:-}
